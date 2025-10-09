@@ -115,30 +115,31 @@ def main(args):
     
     args_train = TrainingArguments(
         output_dir=out_ckpt,
-        per_device_train_batch_size=1,          # <-- smallest per-GPU batch
+        per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=4,          # <-- keeps effective batch ~= 4
+        gradient_accumulation_steps=4,
+
         learning_rate=cfg["model"]["lr"],
         num_train_epochs=cfg["model"]["epochs"],
         weight_decay=0.01,
         warmup_ratio=0.1,
 
-        # eval/save cadence
-        eval_strategy="epoch",                  # (rename from evaluation_strategy to silence warning)
+        eval_strategy="epoch",
         save_strategy="epoch",
         logging_steps=25,
         save_total_limit=2,
 
         # memory stability
-        fp16=False,                             # <-- turn off mixed precision (T4/P100 can be finicky)
-        gradient_checkpointing=True,            # <-- big memory saver
-        max_grad_norm=1.0,                      # <-- clip; avoid exploding grads (yours were huge)
-        dataloader_num_workers=2,               # <-- fewer workers = less RAM pressure
-        dataloader_pin_memory=False,            # sometimes helps on Kaggle
+        fp16=False,
+        gradient_checkpointing=False,    # <-- turn OFF (caused the crash)
+        max_grad_norm=1.0,
+        dataloader_num_workers=0,        # <-- extra safe on Kaggle; reduces forks/RAM
+        dataloader_pin_memory=False,
 
         remove_unused_columns=True,
         report_to="none",
     )
+
 
 
     trainer = Trainer(
