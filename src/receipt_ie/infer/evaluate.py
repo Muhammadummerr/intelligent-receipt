@@ -1,25 +1,49 @@
 # src/receipt_ie/infer/evaluate.py
-import os, json, argparse, re
-from typing import Dict
+import os, json, argparse
+from typing import Dict, Optional, List
 from rapidfuzz import fuzz
 from ..utils.postproc import norm_spaces, norm_date, norm_total
 
-def load_gt(ent_path: str) -> Dict[str,str]:
-    with open(ent_path, "r", encoding="utf-8") as f:
-        j = json.load(f)
-    # robust to minor key variants
-    def pick(j, keys, default=""):
+PRED_EXTS = [".json", ".txt"]
+GT_EXTS   = [".json", ".txt"]
+
+def _read_json_forgiving(path: str) -> Dict:
+    # tolerate cp1252/latin-1, etc.
+    for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+        try:
+            with open(path, "r", encoding=enc) as f:
+                return json.load(f)
+        except UnicodeDecodeError:
+            continue
+    with open(path, "rb") as f:
+        return json.loads(f.read().decode("latin-1", errors="ignore"))
+
+def _find_with_ext(dirpath: str, stem: str, exts: List[str]) -> Optional[str]:
+    for e in exts:
+        p = os.path.join(dirpath, stem + e)
+        if os.path.isfile(p):
+            return p
+    return None
+
+def load_gt(ent_dir: str, stem: str) -> Dict[str, str]:
+    ent_path = _find_with_ext(ent_dir, stem, GT_EXTS)
+    if ent_path is None:
+        raise FileNotFoundError(f"Missing GT for {stem} in {ent_dir}")
+    j = _read_json_forgiving(ent_path)
+
+    def pick(keys, default=""):
         for k in keys:
             if k in j and j[k]:
                 s = str(j[k]).strip()
                 if s:
                     return s
         return default
+
     return {
-        "company": pick(j, ["company","vendor","merchant","store","company_name"]),
-        "date":    pick(j, ["date","invoice_date","receipt_date"]),
-        "address": pick(j, ["address","addr","location","address1","address_1"]),
-        "total":   pick(j, ["total","amount","grand_total","total_amount","total_sales","total_sale"]),
+        "company": pick(["company","vendor","merchant","store","company_name"]),
+        "date":    pick(["date","invoice_date","receipt_date"]),
+        "address": pick(["address","addr","location","address1","address_1"]),
+        "total":   pick(["total","amount","grand_total","total_amount","total_sales","total_sale"]),
     }
 
 def main(args):
@@ -27,7 +51,12 @@ def main(args):
     data_root = args.data_root
     gt_dir = os.path.join(data_root, "test", "entities")
 
-    stems = [os.path.splitext(f)[0] for f in os.listdir(pred_dir) if f.endswith(".txt")]
+    # collect stems from predictions (accept .json or .txt)
+    stems = []
+    for f in os.listdir(pred_dir):
+        base, ext = os.path.splitext(f)
+        if ext in PRED_EXTS:
+            stems.append(base)
     stems.sort()
 
     n = 0
@@ -35,9 +64,11 @@ def main(args):
     fuzzy_addr = []
 
     for s in stems:
-        with open(os.path.join(pred_dir, s+".txt"), "r", encoding="utf-8") as f:
-            p = json.load(f)
-        g = load_gt(os.path.join(gt_dir, s+".txt"))
+        pred_path = _find_with_ext(pred_dir, s, PRED_EXTS)
+        if pred_path is None:
+            continue
+        p = _read_json_forgiving(pred_path)
+        g = load_gt(gt_dir, s)
 
         # normalize
         p_norm = {
@@ -58,7 +89,7 @@ def main(args):
             if p_norm[k] == g_norm[k]:
                 em_counts[k] += 1
 
-        # address fuzzy score (token-set)
+        # address fuzzy score
         if g_norm["address"] or p_norm["address"]:
             fuzzy_addr.append(fuzz.token_set_ratio(p_norm["address"], g_norm["address"]))
         n += 1
