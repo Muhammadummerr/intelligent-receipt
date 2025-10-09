@@ -23,12 +23,28 @@ class EntityGT:
 def load_entities(path: str) -> EntityGT:
     with open(path, "r", encoding="utf-8") as f:
         j = json.load(f)
+
+    # helper: get first non-empty value among candidate keys
+    def pick(keys, default=""):
+        for k in keys:
+            if k in j and j[k] is not None:
+                val = str(j[k]).strip()
+                if val != "":
+                    return val
+        return default
+
+    company = pick(["company", "vendor", "merchant", "store", "company_name"])
+    date    = pick(["date", "invoice_date", "receipt_date"])
+    address = pick(["address", "addr", "location", "address_1", "address1"])
+    total   = pick(["total", "amount", "total_amount", "grand_total", "total_sales", "total_sale"])
+
     return EntityGT(
-        company=normalize_spaces(j["company"]),
-        date=normalize_spaces(j["date"]),
-        address=normalize_spaces(j["address"]),
-        total=normalize_spaces(j["total"]),
+        company=normalize_spaces(company),
+        date=normalize_spaces(date),
+        address=normalize_spaces(address),
+        total=normalize_spaces(total),
     )
+
 
 # --- Heuristics to score which line belongs to which field ---
 
