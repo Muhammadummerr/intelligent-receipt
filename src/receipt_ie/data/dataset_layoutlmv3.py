@@ -1,10 +1,12 @@
+# src/receipt_ie/data/dataset_layoutlmv3.py
+
 import json, os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from PIL import Image
 from transformers import LayoutLMv3Processor
-from .boxes import parse_box_file, sort_reading_order, scale_boxes_to_0_1000
-from .align import assign_lines_to_fields, LABEL2ID
-from ..utils.text import split_tokens, normalize_spaces
+from .boxes import parse_box_file, sort_reading_order
+from .align import assign_lines_to_fields, LABEL2ID, EntityGT, load_entities
+from ..utils.text import split_tokens
 
 FIELD_TO_BI = {
     "COMPANY": ("B-COMPANY","I-COMPANY"),
@@ -13,57 +15,68 @@ FIELD_TO_BI = {
     "TOTAL": ("B-TOTAL","I-TOTAL"),
 }
 
+# Accept common variants / cases
+IMG_EXTS = [".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"]
+BOX_EXTS = [".txt", ".TXT"]
+ENT_EXTS = [".json", ".JSON", ".txt", ".TXT"]
+
+def _find_with_ext(dirpath: str, stem: str, exts: List[str]) -> Optional[str]:
+    for e in exts:
+        p = os.path.join(dirpath, stem + e)
+        if os.path.isfile(p):
+            return p
+    return None
+
 class ReceiptLayoutLMv3Dataset:
     def __init__(self, img_dir: str, box_dir: str, ent_dir: str,
                  processor: LayoutLMv3Processor, max_seq_len: int = 1024,
-                 stems_subset: List[str] = None):
+                 stems_subset: Optional[List[str]] = None):
         self.img_dir = img_dir
         self.box_dir = box_dir
         self.ent_dir = ent_dir
         self.processor = processor
         self.max_seq_len = max_seq_len
 
-        all_stems = []
+        # Discover stems by actual files present (image + box + entities in ANY allowed ext)
+        discovered = set()
         for name in os.listdir(img_dir):
             stem, ext = os.path.splitext(name)
-            if not os.path.isfile(os.path.join(box_dir, stem + ".txt")):
+            if ext not in IMG_EXTS:
                 continue
-            if not os.path.isfile(os.path.join(ent_dir, stem + ".json")):
-                continue
-            all_stems.append(stem)
-        all_stems = sorted(all_stems)
+            if _find_with_ext(box_dir, stem, BOX_EXTS) and _find_with_ext(ent_dir, stem, ENT_EXTS):
+                discovered.add(stem)
+
+        all_stems = sorted(discovered)
         if stems_subset:
             keep = set(stems_subset)
             self.stems = [s for s in all_stems if s in keep]
         else:
             self.stems = all_stems
 
-
     def __len__(self):
         return len(self.stems)
 
     def _read_item(self, idx: int):
         stem = self.stems[idx]
-        img_path = os.path.join(self.img_dir, stem + ".jpg")
-        if not os.path.exists(img_path):
-            # fallback to png
-            img_path = os.path.join(self.img_dir, stem + ".png")
-        box_path = os.path.join(self.box_dir, stem + ".txt")
-        ent_path = os.path.join(self.ent_dir, stem + ".json")
+
+        img_path = _find_with_ext(self.img_dir, stem, IMG_EXTS)
+        box_path = _find_with_ext(self.box_dir, stem, BOX_EXTS)
+        ent_path = _find_with_ext(self.ent_dir, stem, ENT_EXTS)
+        assert img_path and box_path and ent_path, f"Missing files for {stem}"
 
         image = Image.open(img_path).convert("RGB")
         W, H = image.size
 
         lines = sort_reading_order(parse_box_file(box_path))
-        with open(ent_path, "r", encoding="utf-8") as f:
-            gt = json.load(f)
+        # entities may be in .json or .txt (but JSON content) — load with our helper
+        ent = load_entities(ent_path)  # returns EntityGT
 
-        return stem, image, W, H, lines, gt
+        return stem, image, W, H, lines, ent
 
     def __getitem__(self, idx: int):
-        stem, image, W, H, lines, gt = self._read_item(idx)
+        stem, image, W, H, lines, ent = self._read_item(idx)
 
-        # 1) scale bboxes to 0..1000 space
+        # 1) scale line bboxes to 0..1000 layout space
         scaled = []
         for li in lines:
             xmin, ymin, xmax, ymax = li.aabb
@@ -72,8 +85,6 @@ class ReceiptLayoutLMv3Dataset:
             scaled.append((sxmin, symin, sxmax, symax, li.text))
 
         # 2) assign each line to a field (or None)
-        from .align import EntityGT, load_entities, assign_lines_to_fields, LABEL2ID
-        ent = load_entities(os.path.join(self.ent_dir, stem + ".json"))
         mapping = assign_lines_to_fields(lines, ent)
 
         # 3) flatten into token-level lists
