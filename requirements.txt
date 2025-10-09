@@ -5,6 +5,5 @@ opencv-python-headless
 Pillow
 rapidfuzz>=3.0.0
 pyyaml
-seqeval
 python-dateutil
 

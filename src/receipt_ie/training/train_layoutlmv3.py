@@ -1,25 +1,19 @@
-import os, yaml, argparse
-
+import os
 os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
 os.environ.setdefault("TRANSFORMERS_NO_JAX", "1")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
-
+import yaml, argparse
 import numpy as np
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
-from transformers import (
-    LayoutLMv3Processor,
-    AutoModelForTokenClassification,
-    TrainingArguments,
-    Trainer,
-)
-from datasets import Dataset
-from seqeval.metrics import f1_score, classification_report
+from transformers import LayoutLMv3Processor, AutoModelForTokenClassification, TrainingArguments, Trainer
 import torch
 
 from ..data.dataset_layoutlmv3 import ReceiptLayoutLMv3Dataset, label_mappings
 from ..data.splits import list_stems, make_train_val, save_split, load_split
+from ..data.collate import identity_collate
+
 
 @dataclass
 class Paths:
@@ -58,27 +52,15 @@ def as_hf_dataset(torch_ds: ReceiptLayoutLMv3Dataset):
 
 def compute_metrics_builder(id2label):
     def compute_metrics(eval_pred):
-        preds, labels = eval_pred
-        # preds: (bsz, seq, nlabels), labels: (bsz, seq)
+        preds, labels = eval_pred  # preds: (bs, seq, n_labels), labels: (bs, seq)
         pred_ids = np.argmax(preds, axis=-1)
-
-        # convert to label strings, ignoring -100
-        true_labels = []
-        true_preds = []
-        for p, l in zip(pred_ids, labels):
-            tl = []
-            tp = []
-            for pi, li in zip(p, l):
-                if li == -100:
-                    continue
-                tl.append(id2label[int(li)])
-                tp.append(id2label[int(pi)])
-            true_labels.append(tl)
-            true_preds.append(tp)
-
-        f1 = f1_score(true_labels, true_preds)
-        return {"seqeval_f1": f1}
+        mask = labels != -100
+        correct = (pred_ids[mask] == labels[mask]).sum()
+        total = mask.sum()
+        acc = float(correct) / float(total) if total > 0 else 0.0
+        return {"token_acc": acc}
     return compute_metrics
+
 
 def main(args):
     # Load config
@@ -103,13 +85,14 @@ def main(args):
     label2id, id2label = get_label_lists()
 
     train_ds = ReceiptLayoutLMv3Dataset(
-        img_dir=paths.train_img,
-        box_dir=paths.train_box,
-        ent_dir=paths.train_entities,
-        processor=processor,
-        max_seq_len=cfg["model"]["max_seq_len"],
-        stems_subset=train_stems,
+    img_dir=paths.train_img,
+    box_dir=paths.train_box,
+    ent_dir=paths.train_entities,
+    processor=processor,
+    max_seq_len=cfg["model"]["max_seq_len"],
+    stems_subset=train_stems,
     )
+
     val_ds = ReceiptLayoutLMv3Dataset(
         img_dir=paths.train_img,
         box_dir=paths.train_box,
@@ -119,9 +102,6 @@ def main(args):
         stems_subset=val_stems,
     )
 
-    hf_train = as_hf_dataset(train_ds)
-    hf_val = as_hf_dataset(val_ds)
-
     model = AutoModelForTokenClassification.from_pretrained(
         "microsoft/layoutlmv3-base",
         num_labels=len(label2id),
@@ -129,7 +109,6 @@ def main(args):
         label2id=label2id,
     )
 
-    # training args (Kaggle-friendly defaults)
     out_ckpt = os.path.join(paths.work_dir, "checkpoints")
     args_train = TrainingArguments(
         output_dir=out_ckpt,
@@ -145,15 +124,16 @@ def main(args):
         save_total_limit=2,
         fp16=torch.cuda.is_available(),
         remove_unused_columns=False,  # important for LayoutLMv3 inputs
-        report_to="none"
+        report_to="none",
     )
 
     trainer = Trainer(
         model=model,
         args=args_train,
-        train_dataset=hf_train,
-        eval_dataset=hf_val,
+        train_dataset=train_ds,     # <-- use our dataset directly
+        eval_dataset=val_ds,        # <-- use our dataset directly
         tokenizer=processor.tokenizer,
+        data_collator=identity_collate,             # <-- important
         compute_metrics=compute_metrics_builder(id2label),
     )
 
