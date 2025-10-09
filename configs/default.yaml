@@ -3,13 +3,14 @@ seed: 42
 
 # dataset layout (we'll map Kaggle input paths later)
 data:
-  root: ./data                         # local dev
+  root: /kaggle/input/receipt-dataset
   train_img_dir: ${data.root}/train/img
   train_box_dir: ${data.root}/train/box
   train_entities_dir: ${data.root}/train/entities
   test_img_dir: ${data.root}/test/img
   test_box_dir: ${data.root}/test/box
   test_entities_dir: ${data.root}/test/entities
+
 
 model:
   backend: layoutlmv3   # options: layoutlmv3 | donut | trocr_ner
