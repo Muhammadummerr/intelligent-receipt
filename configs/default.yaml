@@ -14,7 +14,7 @@ data:
 
 model:
   backend: layoutlmv3   # options: layoutlmv3 | donut | trocr_ner
-  max_seq_len: 384
+  max_seq_len: 1024
   batch_size: 8
   lr: 5.0e-5
   epochs: 10
