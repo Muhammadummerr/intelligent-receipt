@@ -27,7 +27,7 @@ def main(args):
     data_root = args.data_root
     gt_dir = os.path.join(data_root, "test", "entities")
 
-    stems = [os.path.splitext(f)[0] for f in os.listdir(pred_dir) if f.endswith(".json")]
+    stems = [os.path.splitext(f)[0] for f in os.listdir(pred_dir) if f.endswith(".txt")]
     stems.sort()
 
     n = 0
@@ -35,9 +35,9 @@ def main(args):
     fuzzy_addr = []
 
     for s in stems:
-        with open(os.path.join(pred_dir, s+".json"), "r", encoding="utf-8") as f:
+        with open(os.path.join(pred_dir, s+".txt"), "r", encoding="utf-8") as f:
             p = json.load(f)
-        g = load_gt(os.path.join(gt_dir, s+".json"))
+        g = load_gt(os.path.join(gt_dir, s+".txt"))
 
         # normalize
         p_norm = {
