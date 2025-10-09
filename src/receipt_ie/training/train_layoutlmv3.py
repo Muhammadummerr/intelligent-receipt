@@ -161,8 +161,12 @@ def main(args):
     final_dir = os.path.join(paths.work_dir, "final")
     os.makedirs(final_dir, exist_ok=True)
     trainer.save_model(final_dir)
-    processor.tokenizer.save_pretrained(final_dir)
-    print(f"Saved final model to: {final_dir}")
+
+    # SAVE THE FULL PROCESSOR, not just tokenizer
+    processor.save_pretrained(final_dir)
+
+    print(f"Saved final model+processor to: {final_dir}")
+
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()

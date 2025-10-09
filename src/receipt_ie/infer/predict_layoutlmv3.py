@@ -11,7 +11,16 @@ from ..utils.postproc import group_bio, norm_spaces, norm_date, norm_total
 def main(args):
     os.makedirs(args.out_dir, exist_ok=True)
 
-    processor = LayoutLMv3Processor.from_pretrained(args.model_dir, apply_ocr=False)
+    # NEW: allow separate processor_dir
+    proc_dir = args.processor_dir
+    if proc_dir is None:
+        # try model_dir first, fallback to base if preprocessor not present
+        if os.path.isfile(os.path.join(args.model_dir, "preprocessor_config.json")):
+            proc_dir = args.model_dir
+        else:
+            proc_dir = "microsoft/layoutlmv3-base"
+
+    processor = LayoutLMv3Processor.from_pretrained(proc_dir, apply_ocr=False)
     model = AutoModelForTokenClassification.from_pretrained(args.model_dir)
     model.eval().to(args.device)
 
@@ -103,5 +112,6 @@ if __name__ == "__main__":
     ap.add_argument("--batch_size", type=int, default=2)
     ap.add_argument("--max_seq_len", type=int, default=512)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--processor_dir", default=None)  # NEW
     args = ap.parse_args()
     main(args)
