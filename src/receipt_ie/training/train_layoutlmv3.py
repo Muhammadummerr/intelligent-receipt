@@ -1,4 +1,10 @@
 import os, yaml, argparse
+
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+os.environ.setdefault("TRANSFORMERS_NO_JAX", "1")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
+
 import numpy as np
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
