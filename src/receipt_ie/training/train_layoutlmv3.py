@@ -2,6 +2,8 @@ import os
 os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
 os.environ.setdefault("TRANSFORMERS_NO_JAX", "1")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")  # silence fork warning & save a bit of RAM
+os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "0")        # keep async; if debugging, set "1"
 
 import yaml, argparse
 import numpy as np
@@ -110,22 +112,34 @@ def main(args):
     )
 
     out_ckpt = os.path.join(paths.work_dir, "checkpoints")
+    
     args_train = TrainingArguments(
         output_dir=out_ckpt,
-        per_device_train_batch_size=cfg["model"]["batch_size"],
-        per_device_eval_batch_size=cfg["model"]["batch_size"],
+        per_device_train_batch_size=1,          # <-- smallest per-GPU batch
+        per_device_eval_batch_size=1,
+        gradient_accumulation_steps=4,          # <-- keeps effective batch ~= 4
         learning_rate=cfg["model"]["lr"],
         num_train_epochs=cfg["model"]["epochs"],
         weight_decay=0.01,
         warmup_ratio=0.1,
-        evaluation_strategy="epoch",
+
+        # eval/save cadence
+        eval_strategy="epoch",                  # (rename from evaluation_strategy to silence warning)
         save_strategy="epoch",
-        logging_steps=50,
+        logging_steps=25,
         save_total_limit=2,
-        fp16=torch.cuda.is_available(),
-        remove_unused_columns=False,  # important for LayoutLMv3 inputs
+
+        # memory stability
+        fp16=False,                             # <-- turn off mixed precision (T4/P100 can be finicky)
+        gradient_checkpointing=True,            # <-- big memory saver
+        max_grad_norm=1.0,                      # <-- clip; avoid exploding grads (yours were huge)
+        dataloader_num_workers=2,               # <-- fewer workers = less RAM pressure
+        dataloader_pin_memory=False,            # sometimes helps on Kaggle
+
+        remove_unused_columns=True,
         report_to="none",
     )
+
 
     trainer = Trainer(
         model=model,
