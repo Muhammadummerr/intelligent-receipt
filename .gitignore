@@ -1,0 +1,23 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# data & outputs (we'll point Kaggle to its own /kaggle/input path)
+data/
+outputs/
+checkpoints/
+wandb/
+lightning_logs/
+
+# notebooks & caches
+.ipynb_checkpoints/
+*.log
+
+# OS
+.DS_Store
+
+# vscode / IDE
+.vscode/
+.idea/

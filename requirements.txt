@@ -1,0 +1,15 @@
+torch>=2.0.0
+torchvision
+transformers>=4.40.0
+datasets
+accelerate
+timm
+opencv-python
+Pillow
+pandas
+numpy
+scikit-learn
+python-dateutil
+rapidfuzz
+pyyaml
+seqeval
