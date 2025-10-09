@@ -4,27 +4,37 @@ from typing import Any, Dict, List
 
 def identity_collate(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Minimal collator for Hugging Face Trainer when you're NOT using `datasets`.
-    Assumes each item is a dict of tensors plus a few non-tensor fields (e.g., 'id').
+    Collator for HF Trainer when not using 🤗 datasets.
+    Returns ONLY the keys the model expects; drops metadata like 'id'.
 
-    - Stacks tensor-like values with `torch.stack`.
-    - Keeps non-tensor values as a list (so 'id' becomes a list of strings).
+    Expected tensor keys for LayoutLMv3 token classification:
+      - input_ids
+      - attention_mask
+      - bbox
+      - pixel_values
+      - labels
+      - (optional) token_type_ids
+      d
     """
     import torch
 
     if not batch:
         return {}
 
+    allowed = {
+        "input_ids",
+        "attention_mask",
+        "bbox",
+        "pixel_values",
+        "labels",
+        "token_type_ids",  # may or may not be present
+    }
+
     out: Dict[str, Any] = {}
-    keys = batch[0].keys()
-
-    for k in keys:
-        v0 = batch[0][k]
-        # Heuristic: tensors have `.shape` and are torch.Tensor
-        if hasattr(v0, "shape") and isinstance(v0, torch.Tensor):
+    # stack only allowed tensor keys that exist
+    for k in allowed:
+        if k in batch[0] and hasattr(batch[0][k], "shape") and isinstance(batch[0][k], torch.Tensor):
             out[k] = torch.stack([b[k] for b in batch], dim=0)
-        else:
-            # keep as a simple python list (e.g., ids)
-            out[k] = [b[k] for b in batch]
 
+    #NOTE: we intentionally DROP non-tensor metadata (e.g., 'id').
     return out
