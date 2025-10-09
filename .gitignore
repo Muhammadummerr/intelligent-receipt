@@ -5,7 +5,6 @@ __pycache__/
 venv/
 
 # data & outputs (we'll point Kaggle to its own /kaggle/input path)
-data/
 outputs/
 checkpoints/
 wandb/
