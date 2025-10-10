@@ -99,3 +99,11 @@ def clean_company(s: str) -> str:
     s = norm_spaces(s)
     s = LEGAL_JUNK.sub("", s).strip(" -:|")
     return s
+
+
+# ---- compatibility aliases----
+def norm_date(s: str) -> str:
+    return soft_date_norm(s)
+
+def norm_total(s: str) -> str:
+    return soft_total_norm(s)
