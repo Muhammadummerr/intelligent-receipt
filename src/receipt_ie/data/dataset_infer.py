@@ -1,4 +1,5 @@
 # src/receipt_ie/data/dataset_infer.py
+import torch
 import os
 from typing import List, Optional
 from PIL import Image
@@ -82,11 +83,22 @@ class ReceiptInferenceDataset:
             return_tensors="pt",
         )
         item = {k: v.squeeze(0) for k, v in enc.items()}
-        # critical: keep word_ids aligned to tokens (pad -> -1)
-        enc0 = enc.encodings[0]  # fast tokenizer encoding
-        wids = enc0.word_ids()    # list[Optional[int]] length = seq_len
+
+        # keep word_ids aligned to tokens (pad -> -1), version-safe
+        enc0 = enc.encodings[0]  # EncodingFast
+        wids_attr = getattr(enc0, "word_ids", None)
+        if callable(wids_attr):
+            wids = wids_attr()                      # older API: method
+        else:
+            wids = list(wids_attr) if wids_attr is not None else None  # newer API: list
+
+        if wids is None:
+            # fallback: no mapping available; align everything to -1
+            wids = [None] * item["input_ids"].shape[0]
+
         item["word_ids"] = torch.tensor([(-1 if w is None else w) for w in wids], dtype=torch.long)
-        item["orig_words"] = words  # keep original words for span reconstruction
+        item["orig_words"] = words
         item["id"] = stem
         return item
+
 
