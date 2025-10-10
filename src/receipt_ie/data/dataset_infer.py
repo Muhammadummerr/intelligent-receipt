@@ -54,11 +54,9 @@ class ReceiptInferenceDataset:
 
         image = Image.open(img_path).convert("RGB")
         W, H = image.size
-
-        # read OCR lines and keep reading order
         lines = sort_reading_order(parse_box_file(box_path))
 
-        # words + bbox per word (tokenization at 'word' level like training)
+        # Build word-level inputs like training
         words, boxes = [], []
         for li in lines:
             xmin, ymin, xmax, ymax = li.aabb
@@ -69,7 +67,7 @@ class ReceiptInferenceDataset:
                 words.append(_)
                 boxes.append([sxmin, symin, sxmax, symax])
 
-        # truncate (LayoutLMv3 needs equal lengths)
+        # Truncate for safety
         if len(words) > self.max_seq_len:
             words = words[:self.max_seq_len]
             boxes = boxes[:self.max_seq_len]
@@ -84,5 +82,11 @@ class ReceiptInferenceDataset:
             return_tensors="pt",
         )
         item = {k: v.squeeze(0) for k, v in enc.items()}
+        # critical: keep word_ids aligned to tokens (pad -> -1)
+        enc0 = enc.encodings[0]  # fast tokenizer encoding
+        wids = enc0.word_ids()    # list[Optional[int]] length = seq_len
+        item["word_ids"] = torch.tensor([(-1 if w is None else w) for w in wids], dtype=torch.long)
+        item["orig_words"] = words  # keep original words for span reconstruction
         item["id"] = stem
         return item
+

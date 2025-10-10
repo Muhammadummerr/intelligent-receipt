@@ -66,21 +66,19 @@ def norm_spaces(s: str) -> str:
 
 def norm_date(s: str) -> str:
     s = norm_spaces(s)
-    # common receipts: DD/MM/YYYY, DD/MM/YY, YYYY-MM-DD, etc.
-    # standardize to DD/MM/YYYY when possible
-    # try DD/MM/YYYY or D/M/YYYY
-    m = re.match(r"^\s*(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})\s*$", s)
+    # normalize separators and zero-pad day/month, keep year as-is
+    m = re.match(r"^\s*(\d{1,4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,4})\s*$", s)
     if m:
-        d, mth, y = m.groups()
-        if len(y) == 2:
-            y = "20" + y
-        return f"{int(d):02d}/{int(mth):02d}/{int(y):04d}"
-    # try YYYY-MM-DD
-    m = re.match(r"^\s*(\d{4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})\s*$", s)
-    if m:
-        y, mth, d = m.groups()
-        return f"{int(d):02d}/{int(mth):02d}/{int(y):04d}"
+        a, b, c = m.groups()
+        # try common orders; prefer dd/mm/yy(yy) if plausible
+        # If first is 1-2 digits and last is 2-4 digits, assume D/M/Y
+        if len(a) <= 2 and len(c) in (2,3,4):
+            return f"{int(a):02d}/{int(b):02d}/{c}"
+        # If first is 4 digits, assume Y-M-D -> D/M/Y
+        if len(a) == 4 and len(c) <= 2:
+            return f"{int(c):02d}/{int(b):02d}/{a}"
     return s
+
 
 def norm_total(s: str) -> str:
     # pick largest-looking money amount with 2 decimals
