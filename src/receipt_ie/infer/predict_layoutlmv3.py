@@ -96,8 +96,9 @@ def main(args):
         # TOTAL: prefer number inside span; otherwise pick from all text with keyword heuristics
         total = soft_total_norm(raw_total)
         if not total:
-            # If you later store per-line strings in the dataset, pass that list here
-            total = pick_total_from_lines([" ".join(orig_words)])
+            # best-effort pick from actual lines with TOTAL-like keywords
+            line_texts = sample.get("line_texts", [])
+            total = pick_total_from_lines(line_texts)
 
         # ADDRESS: just collapse spaces (your fuzzy score is already excellent)
         address = norm_spaces(raw_address)

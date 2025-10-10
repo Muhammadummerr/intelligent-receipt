@@ -56,6 +56,9 @@ class ReceiptInferenceDataset:
         image = Image.open(img_path).convert("RGB")
         W, H = image.size
         lines = sort_reading_order(parse_box_file(box_path))
+        line_texts = [li.text for li in lines]    
+
+
 
         # Build word-level inputs like training
         # Build word-level inputs like training
@@ -130,6 +133,7 @@ class ReceiptInferenceDataset:
         item["word_ids"] = torch.tensor([(-1 if w is None else w) for w in wids], dtype=torch.long)
         item["orig_words"] = words
         item["id"] = stem
+        item["line_texts"] = line_texts  
         return item
 
 
