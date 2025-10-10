@@ -58,15 +58,46 @@ class ReceiptInferenceDataset:
         lines = sort_reading_order(parse_box_file(box_path))
 
         # Build word-level inputs like training
+        # Build word-level inputs like training
         words, boxes = [], []
         for li in lines:
             xmin, ymin, xmax, ymax = li.aabb
-            sxmin = int(xmin / W * 1000); sxmax = int(xmax / W * 1000)
-            symin = int(ymin / H * 1000); symax = int(ymax / H * 1000)
+
+            # 1) clamp to image bounds
+            xmin = max(0, min(xmin, W - 1))
+            xmax = max(0, min(xmax, W - 1))
+            ymin = max(0, min(ymin, H - 1))
+            ymax = max(0, min(ymax, H - 1))
+
+            # 2) fix inverted boxes if needed
+            if xmax < xmin:
+                xmin, xmax = xmax, xmin
+            if ymax < ymin:
+                ymin, ymax = ymax, ymin
+
+            # 3) ensure non-zero area in pixel space (avoid degenerate boxes)
+            if xmax == xmin:
+                xmax = min(W - 1, xmin + 1)
+            if ymax == ymin:
+                ymax = min(H - 1, ymin + 1)
+
+            # 4) scale to 0..1000 (LayoutLM space) and clamp
+            sxmin = int(xmin / W * 1000)
+            sxmax = int(xmax / W * 1000)
+            symin = int(ymin / H * 1000)
+            symax = int(ymax / H * 1000)
+
+            # final safety clamp (keep within [0,1000])
+            sxmin = max(0, min(sxmin, 1000))
+            sxmax = max(0, min(sxmax, 1000))
+            symin = max(0, min(symin, 1000))
+            symax = max(0, min(symax, 1000))
+
             toks = split_tokens(li.text)
             for _ in toks:
                 words.append(_)
                 boxes.append([sxmin, symin, sxmax, symax])
+
 
         # Truncate for safety
         if len(words) > self.max_seq_len:
