@@ -1,11 +1,19 @@
-# src/receipt_ie/infer/predict_layoutlmv3.py
-import os, json, argparse, torch, numpy as np
+import os, json, argparse
 from tqdm import tqdm
+import torch
 from transformers import LayoutLMv3Processor, AutoModelForTokenClassification
+
 from ..data.dataset_infer import ReceiptInferenceDataset
-from ..data.collate import identity_collate
-from ..utils.text import split_tokens
-from ..utils.postproc import group_bio, norm_spaces, norm_date, norm_total
+from ..utils.decode import group_bio
+
+# NEW: robust cleaners/selectors
+from ..utils.postproc import (
+    norm_spaces,
+    extract_best_date,
+    soft_total_norm,
+    pick_total_from_lines,
+    clean_company,
+)
 
 @torch.no_grad()
 def main(args):
@@ -35,12 +43,14 @@ def main(args):
         sample = ds[i]
         sid = sample["id"]
         word_ids = sample["word_ids"].numpy().tolist()
-        orig_words = sample["orig_words"]
+        orig_words = sample["orig_words"]  # word-level strings (before subwording)
 
         # build a model batch of 1
-        model_inputs = {k: v.unsqueeze(0).to(args.device)
-                        for k, v in sample.items()
-                        if k in ("input_ids","attention_mask","bbox","pixel_values")}
+        model_inputs = {
+            k: v.unsqueeze(0).to(args.device)
+            for k, v in sample.items()
+            if k in ("input_ids", "attention_mask", "bbox", "pixel_values")
+        }
 
         logits = model(**model_inputs).logits  # (1, seq, n_labels)
         pred_ids = logits.argmax(dim=-1).squeeze(0).cpu().numpy().tolist()
@@ -62,25 +72,46 @@ def main(args):
             else:
                 word_level_ids.append(collections.Counter(lab_list).most_common(1)[0][0])
 
+        # ---------------------------
         # BIO grouping on word level
+        # ---------------------------
         fields = group_bio(orig_words, word_level_ids)
 
-        # normalize outputs
+        # ---------------------------
+        # NEW: robust post-processing
+        # ---------------------------
+        raw_company = fields.get("company", "")
+        raw_date    = fields.get("date", "")
+        raw_address = fields.get("address", "")
+        raw_total   = fields.get("total", "")
+
+        # COMPANY: strip legal IDs and trailing junk (TOTAL ITEM, CHANGE, etc.)
+        company = clean_company(raw_company)
+
+        # DATE: extract a single date token from span; fallback to any date in the whole text
+        date = extract_best_date(raw_date)
+        if not date:
+            date = extract_best_date(" ".join(orig_words))
+
+        # TOTAL: prefer number inside span; otherwise pick from all text with keyword heuristics
+        total = soft_total_norm(raw_total)
+        if not total:
+            # If you later store per-line strings in the dataset, pass that list here
+            total = pick_total_from_lines([" ".join(orig_words)])
+
+        # ADDRESS: just collapse spaces (your fuzzy score is already excellent)
+        address = norm_spaces(raw_address)
+
         fields_norm = {
-            "company": norm_spaces(fields.get("company","")),
-            "date":    norm_date(fields.get("date","")),
-            "address": norm_spaces(fields.get("address","")),
-            "total":   norm_total(fields.get("total","")),
+            "company": company,
+            "date":    date,
+            "address": address,
+            "total":   total,
         }
 
         out_path = os.path.join(args.out_dir, f"{sid}.json")
         with open(out_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "company": fields_norm["company"],
-                "date":    fields_norm["date"],
-                "address": fields_norm["address"],
-                "total":   fields_norm["total"],
-            }, f, ensure_ascii=False, indent=2)
+            json.dump(fields_norm, f, ensure_ascii=False, indent=2)
 
         all_out.append({"id": sid, **fields_norm})
 
@@ -93,9 +124,9 @@ if __name__ == "__main__":
     ap.add_argument("--data_root", required=True)
     ap.add_argument("--model_dir", required=True)
     ap.add_argument("--out_dir", default="./preds")
-    ap.add_argument("--batch_size", type=int, default=2)
+    ap.add_argument("--batch_size", type=int, default=2)   # kept for CLI compatibility
     ap.add_argument("--max_seq_len", type=int, default=512)
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--processor_dir", default=None)  # NEW
+    ap.add_argument("--processor_dir", default=None)
     args = ap.parse_args()
     main(args)
