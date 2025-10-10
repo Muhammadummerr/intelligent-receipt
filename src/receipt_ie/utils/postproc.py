@@ -28,15 +28,25 @@ def soft_date_norm(s: str) -> str:
     return s
 
 def extract_best_date(s: str) -> str:
-    """Pick a single date-like token from a noisy string and normalize gently."""
     s_norm = norm_spaces(s)
     hits = DATE_LIKE.findall(s_norm)
     if not hits:
         return ""
-    # simple choice: prefer the first date token (top-left bias)
-    # special case: if there are duplicates, keep unique
-    first = hits[0]
-    return soft_date_norm(first)
+    # prefer tokens that look like day/month/year or include a month name + year
+    def score(tok: str) -> int:
+        t = tok.upper()
+        sc = 0
+        if re.search(r"\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b", t):
+            sc += 2
+        if re.search(r"\d{4}$|\d{2}$", t):  # ends with year-ish
+            sc += 1
+        # penalize patterns like "MAR 18 12" (month + 2 numbers)
+        if re.search(r"^[A-Z]{3,9}\s+\d{1,2}\s+\d{2}$", t):
+            sc -= 1
+        return sc
+    hits.sort(key=score, reverse=True)
+    return soft_date_norm(hits[0])
+
 
 # ----------------------
 # TOTAL
