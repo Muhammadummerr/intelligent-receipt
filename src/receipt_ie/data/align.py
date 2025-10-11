@@ -129,10 +129,21 @@ def assign_lines_to_fields(lines: List[BoxLine], gt: EntityGT) -> Dict[int, str]
             continue
 
         f = choose_field_for_line(li.text, gt, idx, len(ro_lines))
+
+        # 🌟 NEW: address fallback heuristic (detect postal/address patterns)
+        if f == "ADDRESS":
+            s = normalize_spaces(li.text)
+            if re.search(r"\d{4,5}|JALAN|TAMAN|SELANGOR|KUALA\s*LUMPUR|MALAYSIA", s, flags=re.I):
+                mapping[id(li)] = "ADDRESS"
+                continue
+
+        # if a weak fuzzy match still exists, keep it
         if f:
             mapping[id(li)] = f
 
     return mapping
+
+
 def label_mappings():
     id2label = {i: l for i, l in enumerate(LABELS)}
     label2id = {l: i for i, l in id2label.items()}

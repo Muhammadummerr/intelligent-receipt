@@ -11,14 +11,19 @@ data:
   test_box_dir: ${data.root}/test/box
   test_entities_dir: ${data.root}/test/entities
 
-
 model:
-  backend: layoutlmv3   # options: layoutlmv3 | donut | trocr_ner
+  backend: layoutlmv3        # options: layoutlmv3 | donut | trocr_ner
   max_seq_len: 1024
   batch_size: 8
-  lr: 5.0e-5
-  epochs: 10
+  lr: 2.0e-5                 # ↓ updated (was 5.0e-5)
+  weight_decay: 0.05         # new
+  epochs: 15                 # ↑ extended (was 10)
   num_workers: 4
+
+# optional explicit split ratio (for reproducibility)
+split:
+  train_frac: 0.8
+  val_frac: 0.2
 
 logging:
   out_dir: ./outputs

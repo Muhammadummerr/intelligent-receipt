@@ -17,15 +17,23 @@ def soft_date_norm(s: str) -> str:
     s = norm_spaces(s)
     m = re.match(r"^\s*(\d{1,4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,4})\s*$", s)
     if m:
-        a,b,c = m.groups()
+        a, b, c = m.groups()
+
+        # 🔹 NEW: expand 2-digit years like '18' → '2018'
+        if len(c) == 2:
+            c = f"20{c}"
+
         # If D/M/Y (a up to 2 digits; keep year as-is: 2 or 4 digits)
         if len(a) <= 2 and 2 <= len(c) <= 4:
             return f"{int(a):02d}/{int(b):02d}/{c}"
+
         # If Y-M-D -> D/M/Y
         if len(a) == 4 and len(c) <= 2:
             return f"{int(c):02d}/{int(b):02d}/{a}"
+
     # Month name formats -> keep as is (no risky conversion)
     return s
+
 
 def extract_best_date(s: str) -> str:
     s_norm = norm_spaces(s)
@@ -73,21 +81,36 @@ def pick_total_from_lines(lines):
     """
     Pick the best total line, preferring ones containing TOTAL/GRAND TOTAL,
     or bottom-most numeric lines.
+    Adds a small positional bias favoring lower (later) lines,
+    since totals usually appear near the end of receipts.
     """
     best = ""
     best_val = 0.0
-    for ln in lines:
+
+    for i, ln in enumerate(lines):
         if not ln.strip():
             continue
-        m = re.search(r"(\d{1,3}(?:[,\s]\d{3})*(?:\.\d{2}))", ln)
-        if m:
-            val = float(re.sub(r"[,\s]", "", m.group(1)))
-            if re.search(r"\b(total|grand|amount|cash)\b", ln, flags=re.I):
-                # strong keyword boost
-                val += 0.001
-            if val >= best_val:
-                best_val = val
-                best = m.group(1)
+
+        # find all numbers with 2 decimal places
+        nums = re.findall(r"\d{1,3}(?:[,\s]\d{3})*(?:\.\d{2})", ln)
+        if not nums:
+            continue
+
+        # pick the largest numeric value in this line
+        val = max(float(re.sub(r"[,\s]", "", n)) for n in nums)
+
+        # expanded keyword set for more variants
+        if re.search(r"\b(total|grand\s*total|amount\s*due|cash|balance\s*due|amt|sales)\b", ln, flags=re.I):
+            val += 0.001  # strong keyword boost
+
+        # 🌟 NEW: bias towards later (bottom) lines — totals usually appear last
+        val += i * 1e-5
+
+        if val > best_val:
+            best_val = val
+            # choose the largest number in the line as the total candidate
+            best = max(nums, key=lambda x: float(re.sub(r"[,\s]", "", x)))
+
     return best
 
 
