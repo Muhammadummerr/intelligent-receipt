@@ -2,7 +2,8 @@
 import os, json, argparse
 from typing import Dict, Optional, List
 from rapidfuzz import fuzz
-from ..utils.postproc import norm_spaces, norm_date, norm_total
+# from ..utils.postproc import norm_spaces, norm_date, norm_total
+from ..utils.postproc import norm_spaces, norm_date, norm_total, clean_company
 
 PRED_EXTS = [".json", ".txt"]
 GT_EXTS   = [".json", ".txt"]
@@ -71,18 +72,20 @@ def main(args):
         g = load_gt(gt_dir, s)
 
         # normalize
+        
         p_norm = {
-            "company": norm_spaces(p.get("company","")),
+            "company": clean_company(p.get("company","")),
             "date":    norm_date(p.get("date","")),
             "address": norm_spaces(p.get("address","")),
             "total":   norm_total(p.get("total","")),
         }
         g_norm = {
-            "company": norm_spaces(g.get("company","")),
+            "company": clean_company(g.get("company","")),
             "date":    norm_date(g.get("date","")),
             "address": norm_spaces(g.get("address","")),
             "total":   norm_total(g.get("total","")),
         }
+
 
         # exact match stats
         for k in em_counts.keys():

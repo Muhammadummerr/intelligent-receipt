@@ -85,22 +85,33 @@ def choose_field_for_line(line: str, gt: EntityGT) -> Optional[str]:
     return "COMPANY" if c >= a else "ADDRESS"
 
 def assign_lines_to_fields(lines: List[BoxLine], gt: EntityGT) -> Dict[int, str]:
-    """Return mapping line_index -> field or None."""
+    """
+    Return mapping {id(line) -> field_name or None}.
+    Uses id(li) instead of index to avoid mismatch after sorting.
+    """
     mapping: Dict[int, str] = {}
+
+    # Sort once for reading order
     ro_lines = sort_reading_order(lines)
-    # first pass: date / total confident
-    for idx, li in enumerate(ro_lines):
+
+    # --- First pass: detect DATE and TOTAL lines with high confidence ---
+    for li in ro_lines:
         s = normalize_spaces(li.text)
         if is_date_like(s):
-            mapping[idx] = "DATE"
+            mapping[id(li)] = "DATE"
             continue
-        if is_total_amount(s) is not None and re.search(r"\b(total|grand\s*total|amount\s*due|cash)\b", s, flags=re.I):
-            mapping[idx] = "TOTAL"
-    # second pass: company/address with fuzzy scores
-    for idx, li in enumerate(ro_lines):
-        if idx in mapping: 
+        if is_total_amount(s) is not None and re.search(
+            r"\b(total|grand\s*total|amount\s*due|cash)\b", s, flags=re.I
+        ):
+            mapping[id(li)] = "TOTAL"
+
+    # --- Second pass: COMPANY vs ADDRESS using fuzzy matching ---
+    for li in ro_lines:
+        if id(li) in mapping:
             continue
         f = choose_field_for_line(li.text, gt)
         if f:
-            mapping[idx] = f
+            mapping[id(li)] = f
+
     return mapping
+

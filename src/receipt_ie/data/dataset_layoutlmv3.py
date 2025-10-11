@@ -76,25 +76,28 @@ class ReceiptLayoutLMv3Dataset:
     def __getitem__(self, idx: int):
         stem, image, W, H, lines, ent = self._read_item(idx)
 
-        # 1) scale line bboxes to 0..1000 layout space
+        # 1) Scale line bboxes to [0,1000] and clamp safely
         scaled = []
         for li in lines:
             xmin, ymin, xmax, ymax = li.aabb
-            sxmin = int(xmin / W * 1000); sxmax = int(xmax / W * 1000)
-            symin = int(ymin / H * 1000); symax = int(ymax / H * 1000)
+            sxmin = max(0, min(int(xmin / W * 1000), 1000))
+            sxmax = max(0, min(int(xmax / W * 1000), 1000))
+            symin = max(0, min(int(ymin / H * 1000), 1000))
+            symax = max(0, min(int(ymax / H * 1000), 1000))
             scaled.append((sxmin, symin, sxmax, symax, li.text))
 
-        # 2) assign each line to a field (or None)
+        # 2) Assign each line to a field (fixed id-based mapping)
         mapping = assign_lines_to_fields(lines, ent)
 
-        # 3) flatten into token-level lists
+        # 3) Flatten into token-level lists
         words, boxes, labels = [], [], []
         for i, li in enumerate(lines):
             sxmin, symin, sxmax, symax, text = scaled[i]
-            tokens = split_tokens(text)
+            tokens = self.processor.tokenizer.tokenize(text)  # <- safer split
             if not tokens:
                 continue
-            field = mapping.get(i)  # may be None
+
+            field = mapping.get(id(li))  # <- fixed id-based mapping
             if field in FIELD_TO_BI:
                 b_label, i_label = FIELD_TO_BI[field]
             else:
@@ -108,12 +111,18 @@ class ReceiptLayoutLMv3Dataset:
                 else:
                     labels.append(LABEL2ID["O"])
 
-        # 4) truncate to max_seq_len (keep early tokens)
+        # 4) Truncate or pad safely
         if len(words) > self.max_seq_len:
             words = words[:self.max_seq_len]
             boxes = boxes[:self.max_seq_len]
             labels = labels[:self.max_seq_len]
+        else:
+            pad_len = self.max_seq_len - len(words)
+            boxes += [[0, 0, 0, 0]] * pad_len
+            words += ["[PAD]"] * pad_len
+            labels += [-100] * pad_len  # ignore padding in loss
 
+        # 5) Encode with processor
         encoded = self.processor(
             image,
             words,
@@ -122,10 +131,9 @@ class ReceiptLayoutLMv3Dataset:
             truncation=True,
             padding="max_length",
             max_length=self.max_seq_len,
-            return_tensors="pt"
+            return_tensors="pt",
         )
 
-        # flatten batch dim
         item = {k: v.squeeze(0) for k, v in encoded.items()}
         item["id"] = stem
         return item
