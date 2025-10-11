@@ -5,7 +5,9 @@ from typing import Dict, List, Tuple, Optional
 from PIL import Image
 from transformers import LayoutLMv3Processor
 from .boxes import parse_box_file, sort_reading_order
-from .align import assign_lines_to_fields, LABEL2ID, EntityGT, load_entities
+# at the top of dataset_layoutlmv3.py
+from .align import assign_lines_to_fields, LABEL2ID, EntityGT, load_entities, label_mappings
+
 from ..utils.text import split_tokens
 
 FIELD_TO_BI = {
@@ -139,9 +141,5 @@ class ReceiptLayoutLMv3Dataset:
         item["id"] = stem
         return item
 
-        
-def label_mappings():
-    id2label = {i: l for i, l in enumerate(LABELS)}
-    label2id = {l: i for i, l in id2label.items()}
-    return label2id, id2label
+
 
