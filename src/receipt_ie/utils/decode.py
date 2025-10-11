@@ -20,7 +20,10 @@ def group_bio(words: List[str], label_ids: List[int], id2label: Dict[int, str] =
     """
     Convert word-level BIO ids into field strings.
     Returns dict with keys: company, date, address, total (lowercase).
-    Strategy: collect all spans, then pick the longest span per field.
+    Strategy:
+      - Merge consecutive B/I- tags into coherent spans
+      - Prefer early spans for company/address, last span for total
+      - Clean spacing/punctuation
     """
     if id2label is None:
         id2label = ID2LABEL
@@ -29,40 +32,58 @@ def group_bio(words: List[str], label_ids: List[int], id2label: Dict[int, str] =
     cur_field: Optional[str] = None
     buf: List[str] = []
 
+    def _flush(field, buf, spans):
+        if field and buf:
+            spans.setdefault(field, []).append(buf[:])
+        buf.clear()
+
+    # --- Build spans ---
     for w, li in zip(words, label_ids):
+        if w == "[PAD]":
+            continue  # ignore padding tokens
+
         lab = id2label.get(int(li), "O")
         if lab == "O":
-            _flush_span(cur_field, buf, spans)
+            _flush(cur_field, buf, spans)
             cur_field = None
             continue
 
-        prefix, _, tag = lab.partition("-")  # "B", "I" / "COMPANY" etc.
+        prefix, _, tag = lab.partition("-")
         if prefix == "B":
-            _flush_span(cur_field, buf, spans)
+            _flush(cur_field, buf, spans)
             cur_field = tag
             buf.append(w)
         elif prefix == "I":
-            # continue same field if matches; else start new (defensive)
             if cur_field == tag:
                 buf.append(w)
             else:
-                _flush_span(cur_field, buf, spans)
+                _flush(cur_field, buf, spans)
                 cur_field = tag
                 buf.append(w)
         else:
-            # unknown -> flush
-            _flush_span(cur_field, buf, spans)
+            _flush(cur_field, buf, spans)
             cur_field = None
 
-    _flush_span(cur_field, buf, spans)
+    _flush(cur_field, buf, spans)
 
-    # pick longest span per field
+    # --- Pick best span per field ---
     out: Dict[str, str] = {}
     for tag in ("COMPANY", "DATE", "ADDRESS", "TOTAL"):
         cands = spans.get(tag, [])
         if not cands:
             out[tag.lower()] = ""
-        else:
+            continue
+
+        # Prefer early spans for COMPANY/ADDRESS, last for TOTAL
+        if tag in ("COMPANY", "ADDRESS"):
+            best = cands[0]
+        elif tag == "TOTAL":
+            best = cands[-1]
+        else:  # DATE
             best = max(cands, key=lambda s: len(s))
-            out[tag.lower()] = " ".join(best)
+
+        clean = " ".join(best).strip(" -:;,._")
+        out[tag.lower()] = clean
+
     return out
+

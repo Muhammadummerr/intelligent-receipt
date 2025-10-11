@@ -69,31 +69,27 @@ def soft_total_norm(s: str) -> str:
     best = max(nums, key=_to_float)  # largest 2-dec number
     return f"{_to_float(best):.2f}"
 
-def pick_total_from_lines(lines: list) -> str:
+def pick_total_from_lines(lines):
     """
-    Given a list of text lines (e.g., around predicted TOTAL span),
-    prefer lines with TOTAL-like keywords and no negative hints; among numbers pick largest < 100000.
+    Pick the best total line, preferring ones containing TOTAL/GRAND TOTAL,
+    or bottom-most numeric lines.
     """
-    cand = []
-    for t in lines:
-        t0 = norm_spaces(t)
-        score = 0
-        if TOTAL_KEY.search(t0):
-            score += 10
-        if NEGATIVE_HINT.search(t0):
-            score -= 5
-        nums = NUM2.findall(t0)
-        if not nums:
+    best = ""
+    best_val = 0.0
+    for ln in lines:
+        if not ln.strip():
             continue
-        vals = [_to_float(n) for n in nums]
-        top = max(vals)
-        if top < 100000:  # sanity
-            score += min(int(top // 10), 10)  # mild bias to larger totals
-            cand.append((score, top, t0))
-    if not cand:
-        return ""
-    cand.sort(reverse=True)  # highest score first
-    return f"{cand[0][1]:.2f}"
+        m = re.search(r"(\d{1,3}(?:[,\s]\d{3})*(?:\.\d{2}))", ln)
+        if m:
+            val = float(re.sub(r"[,\s]", "", m.group(1)))
+            if re.search(r"\b(total|grand|amount|cash)\b", ln, flags=re.I):
+                # strong keyword boost
+                val += 0.001
+            if val >= best_val:
+                best_val = val
+                best = m.group(1)
+    return best
+
 
 # ----------------------
 # COMPANY
@@ -107,8 +103,22 @@ LEGAL_JUNK = re.compile(
 
 def clean_company(s: str) -> str:
     s = norm_spaces(s)
-    s = LEGAL_JUNK.sub("", s).strip(" -:|")
-    return s
+    
+    # remove copy/duplicate/original markers often in header lines
+    s = re.sub(r"\b(COPY|DUPLICATE|ORIGINAL)\b.*$", "", s, flags=re.I)
+    
+    # remove tax/legal junk (company suffixes etc.)
+    s = re.sub(r"\b(SDN\s*BHD|SDN|BHD|LTD|LIMITED|ENTERPRISE|ENTERPRISES|PLT|CO\.?|M)\b.*", "", s, flags=re.I)
+    
+    # cut off at 'TEL', 'FAX', 'GST', 'TAX INVOICE', 'RECEIPT', etc.
+    s = re.split(r"\b(TEL|FAX|GST|TAX|RECEIPT|INVOICE|DATE|TIME|NO\.)\b", s)[0]
+    
+    # keep only uppercase letters, numbers, & spaces
+    s = re.sub(r"[^A-Z0-9\s\.\-&]", "", s, flags=re.I)
+    
+    return s.strip()
+
+
 
 
 # ---- compatibility aliases----

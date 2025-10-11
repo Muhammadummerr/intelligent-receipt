@@ -93,7 +93,8 @@ class ReceiptLayoutLMv3Dataset:
         words, boxes, labels = [], [], []
         for i, li in enumerate(lines):
             sxmin, symin, sxmax, symax, text = scaled[i]
-            tokens = self.processor.tokenizer.tokenize(text)  # <- safer split
+            clean_text = " ".join(text.split())  # remove redundant spaces/newlines
+            tokens = self.processor.tokenizer.tokenize(clean_text)
             if not tokens:
                 continue
 
@@ -138,5 +139,9 @@ class ReceiptLayoutLMv3Dataset:
         item["id"] = stem
         return item
 
+        
 def label_mappings():
-    return LABEL2ID, {v:k for k,v in LABEL2ID.items()}
+    id2label = {i: l for i, l in enumerate(LABELS)}
+    label2id = {l: i for i, l in id2label.items()}
+    return label2id, id2label
+

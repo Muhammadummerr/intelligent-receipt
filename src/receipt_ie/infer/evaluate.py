@@ -2,14 +2,12 @@
 import os, json, argparse
 from typing import Dict, Optional, List
 from rapidfuzz import fuzz
-# from ..utils.postproc import norm_spaces, norm_date, norm_total
 from ..utils.postproc import norm_spaces, norm_date, norm_total, clean_company
 
 PRED_EXTS = [".json", ".txt"]
-GT_EXTS   = [".json", ".txt"]
+GT_EXTS = [".json", ".txt"]
 
 def _read_json_forgiving(path: str) -> Dict:
-    # tolerate cp1252/latin-1, etc.
     for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
         try:
             with open(path, "r", encoding=enc) as f:
@@ -52,61 +50,71 @@ def main(args):
     data_root = args.data_root
     gt_dir = os.path.join(data_root, "test", "entities")
 
-    # collect stems from predictions (accept .json or .txt)
-    stems = []
-    for f in os.listdir(pred_dir):
-        base, ext = os.path.splitext(f)
-        if ext in PRED_EXTS:
-            stems.append(base)
-    stems.sort()
+    stems = sorted([
+        os.path.splitext(f)[0]
+        for f in os.listdir(pred_dir)
+        if os.path.splitext(f)[1] in PRED_EXTS
+    ])
 
+    if not stems:
+        print(f"No predictions found in {pred_dir}")
+        return
+
+    em_counts = {"company": 0, "date": 0, "address": 0, "total": 0}
+    fuzzy_scores = {"company": [], "date": [], "address": [], "total": []}
     n = 0
-    em_counts = {"company":0,"date":0,"address":0,"total":0}
-    fuzzy_addr = []
 
     for s in stems:
-        pred_path = _find_with_ext(pred_dir, s, PRED_EXTS)
-        if pred_path is None:
+        try:
+            p = _read_json_forgiving(_find_with_ext(pred_dir, s, PRED_EXTS))
+            g = load_gt(gt_dir, s)
+        except Exception as e:
+            print(f"⚠️ Skipping {s}: {e}")
             continue
-        p = _read_json_forgiving(pred_path)
-        g = load_gt(gt_dir, s)
 
         # normalize
-        
         p_norm = {
-            "company": clean_company(p.get("company","")),
-            "date":    norm_date(p.get("date","")),
-            "address": norm_spaces(p.get("address","")),
-            "total":   norm_total(p.get("total","")),
+            "company": clean_company(p.get("company", "")),
+            "date": norm_date(p.get("date", "")),
+            "address": norm_spaces(p.get("address", "")),
+            "total": norm_total(p.get("total", "")),
         }
         g_norm = {
-            "company": clean_company(g.get("company","")),
-            "date":    norm_date(g.get("date","")),
-            "address": norm_spaces(g.get("address","")),
-            "total":   norm_total(g.get("total","")),
+            "company": clean_company(g.get("company", "")),
+            "date": norm_date(g.get("date", "")),
+            "address": norm_spaces(g.get("address", "")),
+            "total": norm_total(g.get("total", "")),
         }
 
-
-        # exact match stats
+        # exact matches
         for k in em_counts.keys():
             if p_norm[k] == g_norm[k]:
                 em_counts[k] += 1
 
-        # address fuzzy score
-        if g_norm["address"] or p_norm["address"]:
-            fuzzy_addr.append(fuzz.token_set_ratio(p_norm["address"], g_norm["address"]))
+        # fuzzy similarity
+        for k in fuzzy_scores.keys():
+            if g_norm[k] or p_norm[k]:
+                score = fuzz.token_set_ratio(p_norm[k], g_norm[k])
+                fuzzy_scores[k].append(score)
+
         n += 1
 
-    def pct(x): return 100.0 * x / max(1,n)
-    print(f"Test items: {n}")
-    print("Exact-match accuracy:")
-    print(f"  company: {em_counts['company']}/{n} ({pct(em_counts['company']):.1f}%)")
-    print(f"  date   : {em_counts['date']}/{n} ({pct(em_counts['date']):.1f}%)")
-    print(f"  total  : {em_counts['total']}/{n} ({pct(em_counts['total']):.1f}%)")
-    print(f"  address: {em_counts['address']}/{n} ({pct(em_counts['address']):.1f}%)")
-    if fuzzy_addr:
-        avg_addr = sum(fuzzy_addr)/len(fuzzy_addr)
-        print(f"  address (avg RapidFuzz token_set_ratio): {avg_addr:.1f}")
+    def pct(x): return 100.0 * x / max(1, n)
+    print(f"\n📊 Evaluation Summary ({n} receipts)\n")
+    print("=== Exact-Match Accuracy ===")
+    for k in em_counts:
+        print(f"  {k:<8}: {em_counts[k]:>4}/{n:<4} ({pct(em_counts[k]):5.1f}%)")
+
+    print("\n=== Average Fuzzy Similarity (token_set_ratio) ===")
+    for k, vals in fuzzy_scores.items():
+        avg = sum(vals)/len(vals) if vals else 0.0
+        print(f"  {k:<8}: {avg:5.1f}")
+
+    # Optional: overall fuzzy F1-style indicator
+    all_fuzzy = sum(sum(v) for v in fuzzy_scores.values())
+    all_counts = sum(len(v) for v in fuzzy_scores.values())
+    avg_fuzzy = all_fuzzy / max(1, all_counts)
+    print(f"\nOverall fuzzy mean similarity: {avg_fuzzy:5.1f}\n")
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()

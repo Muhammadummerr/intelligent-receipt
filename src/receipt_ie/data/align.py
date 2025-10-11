@@ -66,35 +66,48 @@ def is_total_amount(line: str) -> Optional[float]:
         return max(map(to_float, nums))
     return None
 
-def choose_field_for_line(line: str, gt: EntityGT) -> Optional[str]:
+def choose_field_for_line(line: str, gt: EntityGT, line_idx: int = 0, total_lines: int = 0) -> Optional[str]:
     s = normalize_spaces(line)
+
     # DATE
     if is_date_like(s):
         return "DATE"
+
     # TOTAL
     amt = is_total_amount(s)
     if amt is not None:
-        # weak prior: lines with TOTAL-like words get TOTAL
         if re.search(r"\b(total|grand\s*total|amount\s*due)\b", s, flags=re.I):
             return "TOTAL"
-    # COMPANY vs ADDRESS: pick whichever has higher fuzzy score
+
+    # COMPANY vs ADDRESS: position-aware + fuzzy fallback
     c = score_company(s, gt.company)
     a = score_address(s, gt.address)
-    if max(c, a) < 60:
+
+    # ↓ allow weaker fuzzy matches (was 45–60) and use line position hints ↓
+    if max(c, a) < 40:
+        pos = line_idx / max(total_lines, 1)
+        # Top 25 % → COMPANY
+        if pos < 0.25:
+            return "COMPANY"
+        # Middle 25–80 % → ADDRESS (most addresses live here)
+        if 0.25 <= pos <= 0.8:
+            return "ADDRESS"
+        # Bottom 20 % → likely totals
         return None
+
     return "COMPANY" if c >= a else "ADDRESS"
+
 
 def assign_lines_to_fields(lines: List[BoxLine], gt: EntityGT) -> Dict[int, str]:
     """
     Return mapping {id(line) -> field_name or None}.
     Uses id(li) instead of index to avoid mismatch after sorting.
+    Adds light positional priors for COMPANY and ADDRESS.
     """
     mapping: Dict[int, str] = {}
-
-    # Sort once for reading order
     ro_lines = sort_reading_order(lines)
 
-    # --- First pass: detect DATE and TOTAL lines with high confidence ---
+    # --- Pass 1 : DATE / TOTAL ---
     for li in ro_lines:
         s = normalize_spaces(li.text)
         if is_date_like(s):
@@ -105,13 +118,23 @@ def assign_lines_to_fields(lines: List[BoxLine], gt: EntityGT) -> Dict[int, str]
         ):
             mapping[id(li)] = "TOTAL"
 
-    # --- Second pass: COMPANY vs ADDRESS using fuzzy matching ---
-    for li in ro_lines:
+    # --- Pass 2 : COMPANY / ADDRESS (with bias) ---
+    for idx, li in enumerate(ro_lines):
         if id(li) in mapping:
             continue
-        f = choose_field_for_line(li.text, gt)
+
+        # Early lines (top 5) strongly likely COMPANY
+        if idx < 5:
+            mapping[id(li)] = "COMPANY"
+            continue
+
+        f = choose_field_for_line(li.text, gt, idx, len(ro_lines))
         if f:
             mapping[id(li)] = f
 
     return mapping
+def label_mappings():
+    id2label = {i: l for i, l in enumerate(LABELS)}
+    label2id = {l: i for i, l in id2label.items()}
+    return label2id, id2label
 
