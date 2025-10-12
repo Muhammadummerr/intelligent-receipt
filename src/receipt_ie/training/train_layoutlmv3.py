@@ -112,7 +112,10 @@ def main(args):
     )
 
     out_ckpt = os.path.join(paths.work_dir, "checkpoints")
-    
+
+    # 🔹 Read from YAML whether to keep only the best model
+    save_best = cfg["model"].get("save_best_only", False)
+
     args_train = TrainingArguments(
         output_dir=out_ckpt,
         per_device_train_batch_size=1,
@@ -121,19 +124,24 @@ def main(args):
 
         learning_rate=cfg["model"]["lr"],
         num_train_epochs=cfg["model"]["epochs"],
-        weight_decay=0.01,
+        weight_decay=cfg["model"]["weight_decay"],
         warmup_ratio=0.1,
 
-        eval_strategy="epoch",
+        evaluation_strategy="epoch",
         save_strategy="epoch",
         logging_steps=25,
         save_total_limit=2,
 
+        # ✅ new: respect YAML setting
+        load_best_model_at_end=save_best,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,  # ✅ ensures lower eval_loss = better
+
         # memory stability
         fp16=False,
-        gradient_checkpointing=False,    # <-- turn OFF (caused the crash)
+        gradient_checkpointing=False,
         max_grad_norm=1.0,
-        dataloader_num_workers=0,        # <-- extra safe on Kaggle; reduces forks/RAM
+        dataloader_num_workers=0,
         dataloader_pin_memory=False,
 
         remove_unused_columns=True,
@@ -152,20 +160,41 @@ def main(args):
         compute_metrics=compute_metrics_builder(id2label),
     )
 
-    trainer.train()
+        # --- Training ---
+    train_output = trainer.train()
     print("Training done. Running final eval...")
+
+    # --- Evaluate final model ---
     metrics = trainer.evaluate()
     print(metrics)
 
-    # Save final
+    # --- 🔹 Show the best checkpoint info if 'save_best_only' is enabled ---
+    best_ckpt = None
+    if hasattr(trainer, "state") and getattr(trainer.state, "best_model_checkpoint", None):
+        best_ckpt = trainer.state.best_model_checkpoint
+        best_metric = trainer.state.best_metric
+        print(f"\n🏆 Best model selected from checkpoint: {best_ckpt}")
+        print(f"   → Best eval_loss: {best_metric:.6f}\n")
+    else:
+        print("\nℹ️ No specific 'best' checkpoint was found (save_best_only disabled).")
+
+    # --- Save final model and processor ---
     final_dir = os.path.join(paths.work_dir, "final")
     os.makedirs(final_dir, exist_ok=True)
     trainer.save_model(final_dir)
-
-    # SAVE THE FULL PROCESSOR, not just tokenizer
     processor.save_pretrained(final_dir)
 
     print(f"Saved final model+processor to: {final_dir}")
+
+    # --- 🧹 Optional cleanup ---
+    if save_best and best_ckpt:
+        ckpt_root = os.path.dirname(best_ckpt)
+        for sub in os.listdir(ckpt_root):
+            full = os.path.join(ckpt_root, sub)
+            if os.path.isdir(full) and full != best_ckpt:
+                import shutil
+                shutil.rmtree(full, ignore_errors=True)
+        print(f"🧹 Cleaned up all non-best checkpoints under: {ckpt_root}")
 
 
 if __name__ == "__main__":

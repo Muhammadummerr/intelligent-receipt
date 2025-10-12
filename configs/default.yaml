@@ -13,12 +13,13 @@ data:
 
 model:
   backend: layoutlmv3        # options: layoutlmv3 | donut | trocr_ner
-  max_seq_len: 1024
+  max_seq_len: 1024          # longer sequences capture full receipts
   batch_size: 8
-  lr: 2.0e-5                 # ↓ updated (was 5.0e-5)
-  weight_decay: 0.05         # new
-  epochs: 20                 # ↑ extended (was 10)
+  lr: 2.0e-5                 # learning rate tuned for stability
+  weight_decay: 0.05         # regularization to prevent overfitting
+  epochs: 20                 # total training epochs
   num_workers: 4
+  save_best_only: true       # ✅ new: keep only the best epoch (based on eval_loss)
 
 # optional explicit split ratio (for reproducibility)
 split:
