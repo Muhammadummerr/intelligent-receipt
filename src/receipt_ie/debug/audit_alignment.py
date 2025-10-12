@@ -78,7 +78,13 @@ def visualize_sample(stem):
 
     plt.axis("off")
     plt.tight_layout()
-    plt.show()
+
+    out_dir = "/kaggle/working/audit_vis"
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"{stem}.jpg")
+    plt.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"✅ Saved visualization to {out_path}")
 
 
 def main():
