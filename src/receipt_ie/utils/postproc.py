@@ -70,11 +70,18 @@ NEGATIVE_HINT = re.compile(r"\b(gst|tax|vat|discount|rounding|change)\b", re.IGN
 
 def soft_total_norm(s: str) -> str:
     s = norm_spaces(s)
-    s = CURRENCY.sub("", s)
-    nums = NUM2.findall(s)
-    if not nums: 
+    
+    # 🧹 remove currency symbols like RM, MYR, $, USD
+    s = re.sub(r"(RM|MYR|\$|USD)\s*", "", s, flags=re.I)
+    
+    nums = re.findall(r"\d{1,3}(?:[,\s]\d{3})*(?:\.\d{2})|\d+\.\d{2}", s)
+    if not nums:
         return ""
-    best = max(nums, key=_to_float)  # largest 2-dec number
+    
+    def _to_float(x: str) -> float:
+        return float(re.sub(r"[,\s]", "", x))
+    
+    best = max(nums, key=_to_float)  # largest 2-decimal number
     return f"{_to_float(best):.2f}"
 
 def pick_total_from_lines(lines):
@@ -88,8 +95,10 @@ def pick_total_from_lines(lines):
     best_val = 0.0
 
     for i, ln in enumerate(lines):
+
         if not ln.strip():
             continue
+        ln = re.sub(r"RM\s*", "", ln, flags=re.I)
 
         # find all numbers with 2 decimal places
         nums = re.findall(r"\d{1,3}(?:[,\s]\d{3})*(?:\.\d{2})", ln)
@@ -126,20 +135,29 @@ LEGAL_JUNK = re.compile(
 
 def clean_company(s: str) -> str:
     s = norm_spaces(s)
-    
-    # remove copy/duplicate/original markers often in header lines
-    s = re.sub(r"\b(COPY|DUPLICATE|ORIGINAL)\b.*$", "", s, flags=re.I)
-    
-    # remove tax/legal junk (company suffixes etc.)
-    s = re.sub(r"\b(SDN\s*BHD|SDN|BHD|LTD|LIMITED|ENTERPRISE|ENTERPRISES|PLT|CO\.?|M)\b.*", "", s, flags=re.I)
-    
-    # cut off at 'TEL', 'FAX', 'GST', 'TAX INVOICE', 'RECEIPT', etc.
+
+    # 🧹 remove leading numeric or registration codes like "3180203 WESTERN EASTERN STATIONERY"
+    s = re.sub(r"^\d{5,}\s*", "", s)
+
+    # 🧹 remove tax/legal suffixes (SB, SDN BHD, LTD, ENTERPRISE, etc.)
+    s = re.sub(
+        r"\b(SDN\s*BHD|SDN|BHD|LTD|LIMITED|ENTERPRISE|ENTERPRISES|PLT|CO\.?|M|SB|S\/B)\b.*",
+        "",
+        s,
+        flags=re.I
+    )
+
+    # 🧹 cut off at TEL, FAX, GST, TAX, INVOICE, etc.
     s = re.split(r"\b(TEL|FAX|GST|TAX|RECEIPT|INVOICE|DATE|TIME|NO\.)\b", s)[0]
-    
-    # keep only uppercase letters, numbers, & spaces
+
+    # 🧹 remove "COPY", "DUPLICATE", or "ORIGINAL" tags
+    s = re.sub(r"\b(COPY|DUPLICATE|ORIGINAL)\b.*$", "", s, flags=re.I)
+
+    # keep only alphanumerics and key punctuation
     s = re.sub(r"[^A-Z0-9\s\.\-&]", "", s, flags=re.I)
-    
+
     return s.strip()
+
 
 
 
