@@ -41,7 +41,13 @@ def parse_box_file(path: str) -> List[BoxLine]:
         except ValueError:
             # If any coord isn't an int (corrupted line), skip it
             continue
+
         text = ",".join(parts[8:]).strip()
+
+        # 🧹 Skip empty or very short OCR text (e.g. ".", "-")
+        if not text.strip() or len(text.strip()) < 2:
+            continue
+
         lines.append(BoxLine(coords, text))
     return lines
 

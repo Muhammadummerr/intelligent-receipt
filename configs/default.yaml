@@ -12,14 +12,14 @@ data:
   test_entities_dir: ${data.root}/test/entities
 
 model:
-  backend: layoutlmv3        # options: layoutlmv3 | donut | trocr_ner
-  max_seq_len: 1024          # longer sequences capture full receipts
+  backend: layoutlmv3
+  max_seq_len: 1024
   batch_size: 8
-  lr: 2.0e-5                 # learning rate tuned for stability
-  weight_decay: 0.05         # regularization to prevent overfitting
-  epochs: 20                 # total training epochs
+  lr: 1.0e-5          # ↓ smaller LR for fine-tuning
+  weight_decay: 0.05
+  epochs: 15          # micro-tuning phase
   num_workers: 4
-  save_best_only: true       # ✅ new: keep only the best epoch (based on eval_loss)
+  save_best_only: true     # ✅ new: keep only the best epoch (based on eval_loss)
 
 # optional explicit split ratio (for reproducibility)
 split:

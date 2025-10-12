@@ -55,16 +55,22 @@ def score_address(line: str, gt_address: str) -> float:
     return fuzz.token_set_ratio(line, gt_address)
 
 def is_total_amount(line: str) -> Optional[float]:
+    # Normalize common currency symbols before processing
+    s = re.sub(r"(RM|MYR|\$|USD)\s*", "", line, flags=re.I)
+
     # Return numeric amount if line looks like a total candidate, else None
-    if re.search(r"\b(total|grand\s*total|amount\s*due|cash)\b", line, flags=re.I) or re.search(r"\b\d+\.\d{2}\b", line):
+    if re.search(r"\b(total|grand\s*total|amount\s*due|cash)\b", s, flags=re.I) or re.search(r"\b\d+\.\d{2}\b", s):
         # pick the largest number with 2 decimals
-        nums = re.findall(r"\d{1,3}(?:[,\s]\d{3})*(?:\.\d{2})|\d+\.\d{2}", line)
+        nums = re.findall(r"\d{1,3}(?:[,\s]\d{3})*(?:\.\d{2})|\d+\.\d{2}", s)
         if not nums:
             return None
+
         def to_float(x):
             return float(re.sub(r"[,\s]", "", x))
+
         return max(map(to_float, nums))
     return None
+
 
 def choose_field_for_line(line: str, gt: EntityGT, line_idx: int = 0, total_lines: int = 0) -> Optional[str]:
     s = normalize_spaces(line)

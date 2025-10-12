@@ -70,17 +70,20 @@ NEGATIVE_HINT = re.compile(r"\b(gst|tax|vat|discount|rounding|change)\b", re.IGN
 
 def soft_total_norm(s: str) -> str:
     s = norm_spaces(s)
-    
+
     # 🧹 remove currency symbols like RM, MYR, $, USD
     s = re.sub(r"(RM|MYR|\$|USD)\s*", "", s, flags=re.I)
-    
+
+    # 🧹 remove any other stray non-numeric or non-dot characters
+    s = re.sub(r"[^\d\.]", "", s)
+
     nums = re.findall(r"\d{1,3}(?:[,\s]\d{3})*(?:\.\d{2})|\d+\.\d{2}", s)
     if not nums:
         return ""
-    
+
     def _to_float(x: str) -> float:
         return float(re.sub(r"[,\s]", "", x))
-    
+
     best = max(nums, key=_to_float)  # largest 2-decimal number
     return f"{_to_float(best):.2f}"
 
