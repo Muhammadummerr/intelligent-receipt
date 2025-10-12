@@ -34,14 +34,22 @@ def find_with_ext(dirpath, stem, exts=(".jpg", ".jpeg", ".png", ".JPG", ".JPEG",
     return None
 
 
-def visualize_sample(stem):
-    img_path = find_with_ext(IMG_DIR, stem)
-    box_path = os.path.join(BOX_DIR, stem + ".txt")
-    ent_path = os.path.join(ENT_DIR, stem + ".json")
+def find_with_ext(dirpath, stem, exts):
+    for e in exts:
+        p = os.path.join(dirpath, stem + e)
+        if os.path.isfile(p):
+            return p
+    return None
 
-    if not (os.path.isfile(img_path) and os.path.isfile(box_path) and os.path.isfile(ent_path)):
+def visualize_sample(stem):
+    img_path = find_with_ext(IMG_DIR, stem, [".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"])
+    box_path = find_with_ext(BOX_DIR, stem, [".txt", ".TXT"])
+    ent_path = find_with_ext(ENT_DIR, stem, [".json", ".JSON", ".txt", ".TXT"])
+
+    if not (img_path and box_path and ent_path):
         print(f"⚠️ Missing file(s) for {stem}")
         return
+
 
     # load image + OCR boxes + GT entities
     image = Image.open(img_path).convert("RGB")
