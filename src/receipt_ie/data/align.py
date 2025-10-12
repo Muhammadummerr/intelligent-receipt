@@ -24,7 +24,6 @@ def load_entities(path: str) -> EntityGT:
     with open(path, "r", encoding="utf-8") as f:
         j = json.load(f)
 
-    # helper: get first non-empty value among candidate keys
     def pick(keys, default=""):
         for k in keys:
             if k in j and j[k] is not None:
@@ -55,12 +54,11 @@ def score_address(line: str, gt_address: str) -> float:
     return fuzz.token_set_ratio(line, gt_address)
 
 def is_total_amount(line: str) -> Optional[float]:
-    # Normalize common currency symbols before processing
+    # Normalize common currency symbols
     s = re.sub(r"(RM|MYR|\$|USD)\s*", "", line, flags=re.I)
 
-    # Return numeric amount if line looks like a total candidate, else None
+    # Return numeric amount if line looks like a total candidate
     if re.search(r"\b(total|grand\s*total|amount\s*due|cash)\b", s, flags=re.I) or re.search(r"\b\d+\.\d{2}\b", s):
-        # pick the largest number with 2 decimals
         nums = re.findall(r"\d{1,3}(?:[,\s]\d{3})*(?:\.\d{2})|\d+\.\d{2}", s)
         if not nums:
             return None
@@ -75,6 +73,10 @@ def is_total_amount(line: str) -> Optional[float]:
 def choose_field_for_line(line: str, gt: EntityGT, line_idx: int = 0, total_lines: int = 0) -> Optional[str]:
     s = normalize_spaces(line)
 
+    # Skip obvious header/meta lines
+    if re.search(r"(TAX\s*INVOICE|GST\s*ID|INVOICE\s*NO|DOCUMENT\s*NO)", s, flags=re.I):
+        return None
+
     # DATE
     if is_date_like(s):
         return "DATE"
@@ -85,25 +87,22 @@ def choose_field_for_line(line: str, gt: EntityGT, line_idx: int = 0, total_line
         if re.search(r"\b(total|grand\s*total|amount\s*due)\b", s, flags=re.I):
             return "TOTAL"
 
-    # COMPANY vs ADDRESS: position-aware + fuzzy fallback
+    # COMPANY vs ADDRESS: position + fuzzy
     c = score_company(s, gt.company)
     a = score_address(s, gt.address)
 
-    # 🌟 Soft label: lines with TEL/FAX/GST below header are likely part of ADDRESS
+    # TEL/FAX/GST below header → ADDRESS
     if re.search(r"\b(TEL|FAX|GST|ID|INVOICE|TAX)\b", s, flags=re.I):
         if line_idx > total_lines * 0.1:
             return "ADDRESS"
 
-    # ↓ allow weaker fuzzy matches (was 45–60) and use line position hints ↓
+    # If fuzzy score weak, use position hints
     if max(c, a) < 40:
         pos = line_idx / max(total_lines, 1)
-        # Top 25 % → COMPANY
         if pos < 0.25:
             return "COMPANY"
-        # Middle 25–80 % → ADDRESS (most addresses live here)
         if 0.25 <= pos <= 0.8:
             return "ADDRESS"
-        # Bottom 20 % → likely totals
         return None
 
     return "COMPANY" if c >= a else "ADDRESS"
@@ -112,52 +111,58 @@ def choose_field_for_line(line: str, gt: EntityGT, line_idx: int = 0, total_line
 def assign_lines_to_fields(lines: List[BoxLine], gt: EntityGT) -> Dict[int, str]:
     """
     Return mapping {id(line) -> field_name or None}.
-    Uses id(li) instead of index to avoid mismatch after sorting.
-    Adds light positional priors for COMPANY and ADDRESS.
+    Adds smarter cutoffs and positional priors for COMPANY and ADDRESS.
     """
     mapping: Dict[int, str] = {}
     ro_lines = sort_reading_order(lines)
 
-    # --- Pass 1 : DATE / TOTAL ---
+    # --- Pass 1: DATE / TOTAL ---
     for li in ro_lines:
         s = normalize_spaces(li.text)
         if is_date_like(s):
             mapping[id(li)] = "DATE"
             continue
-        if is_total_amount(s) is not None and re.search(
-            r"\b(total|grand\s*total|amount\s*due|cash)\b", s, flags=re.I
-        ):
+        if is_total_amount(s) is not None and re.search(r"\b(total|grand\s*total|amount\s*due|cash)\b", s, flags=re.I):
             mapping[id(li)] = "TOTAL"
 
-    # --- Pass 2 : COMPANY / ADDRESS (with bias) ---
+    # --- Pass 2: COMPANY / ADDRESS (with cutoff logic) ---
+    cutoff_triggered = False
     for idx, li in enumerate(ro_lines):
         if id(li) in mapping:
             continue
 
-        # Early lines (top 5) strongly likely COMPANY
-        if idx < 5:
+        s = normalize_spaces(li.text)
+
+        # Stop assigning ADDRESS once total or invoice-related keywords appear
+        if re.search(r"(TOTAL|AMOUNT|INVOICE|GST|CASH|ROUNDING|CHANGE)", s, flags=re.I):
+            cutoff_triggered = True
+
+        # Early lines (top 5) → likely COMPANY
+        pos = idx / max(len(ro_lines), 1)
+        if idx < 5 and pos < 0.25:
             mapping[id(li)] = "COMPANY"
             continue
 
-        # 1️⃣ Choose best guess via fuzzy scoring
-        f = choose_field_for_line(li.text, gt, idx, len(ro_lines))
+        # After cutoff → do not assign ADDRESS
+        if cutoff_triggered:
+            f = choose_field_for_line(s, gt, idx, len(ro_lines))
+            if f == "ADDRESS":
+                continue
 
-        # 2️⃣ 🌟 NEW: detect address-like lines even when fuzzy score is low
-        s = normalize_spaces(li.text)
+        # Detect address-like text patterns
         if re.search(r"\d{4,5}|JALAN|TAMAN|SELANGOR|KUALA\s*LUMPUR|MALAYSIA", s, flags=re.I):
             mapping[id(li)] = "ADDRESS"
             continue
 
-        # 3️⃣ If fuzzy choice still exists, apply it
+        # Apply fuzzy choice
+        f = choose_field_for_line(s, gt, idx, len(ro_lines))
         if f:
             mapping[id(li)] = f
 
     return mapping
 
 
-
 def label_mappings():
     id2label = {i: l for i, l in enumerate(LABELS)}
     label2id = {l: i for i, l in id2label.items()}
     return label2id, id2label
-
