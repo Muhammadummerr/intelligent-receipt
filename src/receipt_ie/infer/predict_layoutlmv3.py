@@ -75,16 +75,35 @@ def main(args):
         raw_total = fields.get("total", "")
 
         company = clean_company(raw_company)
-        date = extract_best_date(raw_date) or extract_best_date(" ".join(orig_words))
-        total = soft_total_norm(raw_total) or pick_total_from_lines(sample.get("line_texts", []))
+
+        # DATE: extract a single date token from span; fallback to any date in the whole text
+        date = extract_best_date(raw_date)
+        if not date:
+            date = extract_best_date(" ".join(orig_words))
+        if not date:
+            # 🌟 NEW: final fallback – try scanning full receipt text lines
+            date = extract_best_date(" ".join(sample.get("line_texts", [])))
+
+        # TOTAL: prefer number inside span; otherwise pick from all text with keyword heuristics
+        total = soft_total_norm(raw_total)
+        if not total:
+            total = pick_total_from_lines(sample.get("line_texts", []))
+
+        # ADDRESS: normalize spaces
         address = norm_spaces(raw_address)
+
 
         # --- Fallbacks ---
         if not company:
             company = clean_company(" ".join(orig_words[:50]))
         if not address:
-            joined = " ".join(orig_words)
-            m = re.search(r"\d{2,4}\s*[A-Z].*(?:JALAN|TAMAN|SELANGOR|KUALA LUMPUR|MALAYSIA)", joined, flags=re.I)
+            # 🌟 Try detecting address-like pattern in the full OCR text, not just tokens
+            joined = " ".join(sample.get("line_texts", []))
+            m = re.search(
+                r"\b(?:NO\.?\s*\d+|LOT\s*\d+|JALAN|TAMAN|SEKSYEN|BANDAR|MALAYSIA|SELANGOR|KUALA\s*LUMPUR)\b.*",
+                joined,
+                flags=re.I
+            )
             if m:
                 address = norm_spaces(m.group(0))
 

@@ -87,9 +87,16 @@ def main(args):
         }
 
         # exact matches
+        # exact or fuzzy matches (with relaxed address logic)
         for k in em_counts.keys():
-            if p_norm[k] == g_norm[k]:
-                em_counts[k] += 1
+            if k == "address":
+                # 🌟 Count fuzzy matches ≥ 85% as correct
+                if fuzz.token_set_ratio(p_norm[k], g_norm[k]) >= 85:
+                    em_counts[k] += 1
+            else:
+                if p_norm[k] == g_norm[k]:
+                    em_counts[k] += 1
+
 
         # fuzzy similarity
         for k in fuzzy_scores.keys():

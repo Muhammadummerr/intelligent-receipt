@@ -83,8 +83,8 @@ def group_bio(words: List[str], label_ids: List[int], id2label: Dict[int, str] =
             best = max(cands, key=lambda s: len(s))
 
         # 🌟 NEW: limit company span length to prevent over-spanning
-        if tag == "COMPANY" and len(best) > 10:
-            best = best[:10]
+        if tag == "COMPANY" and len(best) > 15:
+            best = best[:15]
 
         clean = " ".join(best).strip(" -:;,._")
         out[tag.lower()] = clean

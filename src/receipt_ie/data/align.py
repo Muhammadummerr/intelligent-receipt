@@ -83,6 +83,11 @@ def choose_field_for_line(line: str, gt: EntityGT, line_idx: int = 0, total_line
     c = score_company(s, gt.company)
     a = score_address(s, gt.address)
 
+    # 🌟 Soft label: lines with TEL/FAX/GST below header are likely part of ADDRESS
+    if re.search(r"\b(TEL|FAX|GST|ID|INVOICE|TAX)\b", s, flags=re.I):
+        if line_idx > total_lines * 0.1:
+            return "ADDRESS"
+
     # ↓ allow weaker fuzzy matches (was 45–60) and use line position hints ↓
     if max(c, a) < 40:
         pos = line_idx / max(total_lines, 1)
@@ -128,20 +133,21 @@ def assign_lines_to_fields(lines: List[BoxLine], gt: EntityGT) -> Dict[int, str]
             mapping[id(li)] = "COMPANY"
             continue
 
+        # 1️⃣ Choose best guess via fuzzy scoring
         f = choose_field_for_line(li.text, gt, idx, len(ro_lines))
 
-        # 🌟 NEW: address fallback heuristic (detect postal/address patterns)
-        if f == "ADDRESS":
-            s = normalize_spaces(li.text)
-            if re.search(r"\d{4,5}|JALAN|TAMAN|SELANGOR|KUALA\s*LUMPUR|MALAYSIA", s, flags=re.I):
-                mapping[id(li)] = "ADDRESS"
-                continue
+        # 2️⃣ 🌟 NEW: detect address-like lines even when fuzzy score is low
+        s = normalize_spaces(li.text)
+        if re.search(r"\d{4,5}|JALAN|TAMAN|SELANGOR|KUALA\s*LUMPUR|MALAYSIA", s, flags=re.I):
+            mapping[id(li)] = "ADDRESS"
+            continue
 
-        # if a weak fuzzy match still exists, keep it
+        # 3️⃣ If fuzzy choice still exists, apply it
         if f:
             mapping[id(li)] = f
 
     return mapping
+
 
 
 def label_mappings():
