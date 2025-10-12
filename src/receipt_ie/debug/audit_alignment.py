@@ -74,17 +74,23 @@ def visualize_sample(stem):
 
 
 def main():
-    stems = [os.path.splitext(f)[0] for f in os.listdir(IMG_DIR) if f.lower().endswith((".jpg", ".png", ".jpeg"))]
-    if len(stems) == 0:
-        print("No images found.")
+    # collect only stems that have all 3 files present
+    img_stems = {os.path.splitext(f)[0] for f in os.listdir(IMG_DIR) if f.lower().endswith((".jpg", ".jpeg", ".png"))}
+    box_stems = {os.path.splitext(f)[0] for f in os.listdir(BOX_DIR) if f.lower().endswith(".txt")}
+    ent_stems = {os.path.splitext(f)[0] for f in os.listdir(ENT_DIR) if f.lower().endswith((".json", ".txt"))}
+
+    valid_stems = sorted(list(img_stems & box_stems & ent_stems))
+    print(f"✅ Found {len(valid_stems)} valid receipts with image+box+entity")
+
+    if not valid_stems:
+        print("No valid triplets found.")
         return
 
-    samples = random.sample(stems, min(N_SAMPLES, len(stems)))
+    samples = random.sample(valid_stems, min(N_SAMPLES, len(valid_stems)))
     print(f"🔍 Visualizing {len(samples)} samples...")
 
     for s in samples:
         visualize_sample(s)
-
 
 if __name__ == "__main__":
     main()
