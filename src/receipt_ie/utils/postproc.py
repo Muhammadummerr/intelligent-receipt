@@ -16,23 +16,26 @@ DATE_LIKE = re.compile(_DATE_TOK, flags=re.IGNORECASE)
 def soft_date_norm(s: str) -> str:
     s = norm_spaces(s)
     m = re.match(r"^\s*(\d{1,4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,4})\s*$", s)
-    if m:
-        a, b, c = m.groups()
+    if not m:
+        return s
 
-        # 🔹 NEW: expand 2-digit years like '18' → '2018'
-        if len(c) == 2:
-            c = f"20{c}"
+    a, b, c = m.groups()
 
-        # If D/M/Y (a up to 2 digits; keep year as-is: 2 or 4 digits)
-        if len(a) <= 2 and 2 <= len(c) <= 4:
-            return f"{int(a):02d}/{int(b):02d}/{c}"
+    # 🔹 Convert long "YYYY" → "YY" for normalization
+    if len(a) == 4 and a.startswith("20"):
+        a = a[-2:]
+    if len(c) == 4 and c.startswith("20"):
+        c = c[-2:]
 
-        # If Y-M-D -> D/M/Y
-        if len(a) == 4 and len(c) <= 2:
-            return f"{int(c):02d}/{int(b):02d}/{a}"
-
-    # Month name formats -> keep as is (no risky conversion)
+    # 🔹 Normalize ordering and padding
+    if len(a) <= 2 and len(c) <= 2:
+        return f"{int(a):02d}/{int(b):02d}/{int(c):02d}"
+    if len(a) <= 2 and len(c) == 2:
+        return f"{int(a):02d}/{int(b):02d}/{int(c):02d}"
+    if len(a) == 4 and len(c) <= 2:
+        return f"{int(c):02d}/{int(b):02d}/{a[-2:]}"
     return s
+
 
 
 def extract_best_date(s: str) -> str:
@@ -69,14 +72,15 @@ TOTAL_KEY = re.compile(r"\b(total|grand\s*total|amount\s*due|cash|balance\s*due|
 NEGATIVE_HINT = re.compile(r"\b(gst|tax|vat|discount|rounding|change)\b", re.IGNORECASE)
 
 def soft_total_norm(s: str) -> str:
-    s = norm_spaces(s)
+    s = norm_spaces(s or "")
 
     # 🧹 remove currency symbols like RM, MYR, $, USD
     s = re.sub(r"(RM|MYR|\$|USD)\s*", "", s, flags=re.I)
 
-    # 🧹 remove any other stray non-numeric or non-dot characters
+    # 🧹 remove other stray characters (only keep digits and dots)
     s = re.sub(r"[^\d\.]", "", s)
 
+    # 🧮 find all 2-decimal numbers and choose the largest
     nums = re.findall(r"\d{1,3}(?:[,\s]\d{3})*(?:\.\d{2})|\d+\.\d{2}", s)
     if not nums:
         return ""
@@ -84,7 +88,7 @@ def soft_total_norm(s: str) -> str:
     def _to_float(x: str) -> float:
         return float(re.sub(r"[,\s]", "", x))
 
-    best = max(nums, key=_to_float)  # largest 2-decimal number
+    best = max(nums, key=_to_float)
     return f"{_to_float(best):.2f}"
 
 def pick_total_from_lines(lines):
@@ -144,19 +148,19 @@ def clean_company(s: str) -> str:
 
     # 🧹 remove tax/legal suffixes (SB, SDN BHD, LTD, ENTERPRISE, etc.)
     s = re.sub(
-        r"\b(SDN\s*BHD|SDN|BHD|LTD|LIMITED|ENTERPRISE|ENTERPRISES|PLT|CO\.?|M|SB|S\/B)\b.*",
+        r"\b(SDN\s*BHD|SDN|BHD|LTD|LIMITED|ENTERPRISES?|PLT|CO\.?|M|SB|S\/B)\b.*",
         "",
         s,
-        flags=re.I
+        flags=re.I,
     )
 
-    # 🧹 cut off at TEL, FAX, GST, TAX, INVOICE, etc.
-    s = re.split(r"\b(TEL|FAX|GST|TAX|RECEIPT|INVOICE|DATE|TIME|NO\.)\b", s)[0]
-
-    # 🧹 remove "COPY", "DUPLICATE", or "ORIGINAL" tags
+    # 🧹 remove "COPY", "DUPLICATE", or "ORIGINAL" tags (do this before TEL/FAX cutoff)
     s = re.sub(r"\b(COPY|DUPLICATE|ORIGINAL)\b.*$", "", s, flags=re.I)
 
-    # keep only alphanumerics and key punctuation
+    # 🧹 cut off at TEL, FAX, GST, TAX, INVOICE, etc.
+    s = re.split(r"\b(TEL|FAX|GST|TAX|INVOICE|RECEIPT|DATE|TIME|NO\.)\b", s)[0]
+
+    # 🧹 keep only alphanumerics and key punctuation
     s = re.sub(r"[^A-Z0-9\s\.\-&]", "", s, flags=re.I)
 
     return s.strip()
@@ -171,3 +175,9 @@ def norm_date(s: str) -> str:
 
 def norm_total(s: str) -> str:
     return soft_total_norm(s)
+
+def soft_addr_norm(s: str) -> str:
+    s = norm_spaces(s.upper())
+    s = re.sub(r"[.,;:]+", " ", s)
+    s = re.sub(r"\b(MALAYSIA|MY)\b", "", s)
+    return re.sub(r"\s+", " ", s).strip()

@@ -2,7 +2,7 @@
 import os, json, argparse
 from typing import Dict, Optional, List
 from rapidfuzz import fuzz
-from ..utils.postproc import norm_spaces, norm_date, norm_total, clean_company
+from ..utils.postproc import norm_spaces, norm_date, norm_total, clean_company,soft_addr_norm
 
 PRED_EXTS = [".json", ".txt"]
 GT_EXTS = [".json", ".txt"]
@@ -76,15 +76,16 @@ def main(args):
         p_norm = {
             "company": clean_company(p.get("company", "")),
             "date": norm_date(p.get("date", "")),
-            "address": norm_spaces(p.get("address", "")),
+            "address": soft_addr_norm(p.get("address", "")),
             "total": norm_total(p.get("total", "")),
         }
         g_norm = {
             "company": clean_company(g.get("company", "")),
             "date": norm_date(g.get("date", "")),
-            "address": norm_spaces(g.get("address", "")),
+            "address": soft_addr_norm(g.get("address", "")),
             "total": norm_total(g.get("total", "")),
         }
+
 
         # exact matches
         # exact or fuzzy matches (with relaxed address logic)
