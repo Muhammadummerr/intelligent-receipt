@@ -54,11 +54,19 @@ def score_address(line: str, gt_address: str) -> float:
     return fuzz.token_set_ratio(line, gt_address)
 
 def is_total_amount(line: str) -> Optional[float]:
-    # Normalize common currency symbols
-    s = re.sub(r"(RM|MYR|\$|USD)\s*", "", line, flags=re.I)
+    # --- Normalize text for consistent numeric matching ---
+    s = line or ""
+    s = re.sub(r"(RM|MYR|\$|USD)\s*", "", s, flags=re.I)  # remove currency symbols
+    s = re.sub(r"(\d)\s+(\d)", r"\1\2", s)  # merge spaced digits (e.g. "8 70" -> "870")
+    s = re.sub(r"[^\dA-Za-z\.\s]", "", s)  # clean stray symbols
 
-    # Return numeric amount if line looks like a total candidate
-    if re.search(r"\b(total|grand\s*total|amount\s*due|cash)\b", s, flags=re.I) or re.search(r"\b\d+\.\d{2}\b", s):
+    # --- Detect total candidates ---
+    # Accept if the line contains numeric patterns or total-like keywords
+    if re.search(r"\b(total|grand\s*total|amount\s*due|cash)\b", s, flags=re.I) \
+       or re.search(r"\b\d+\.\d{2}\b", s) \
+       or re.search(r"\bRM\s*\d", line, flags=re.I):  # accept "RM" pattern directly
+       
+        # Find numeric values with two decimals
         nums = re.findall(r"\d{1,3}(?:[,\s]\d{3})*(?:\.\d{2})|\d+\.\d{2}", s)
         if not nums:
             return None
@@ -66,8 +74,11 @@ def is_total_amount(line: str) -> Optional[float]:
         def to_float(x):
             return float(re.sub(r"[,\s]", "", x))
 
+        # Return largest numeric candidate (likely final total)
         return max(map(to_float, nums))
+
     return None
+
 
 
 def choose_field_for_line(line: str, gt: EntityGT, line_idx: int = 0, total_lines: int = 0) -> Optional[str]:

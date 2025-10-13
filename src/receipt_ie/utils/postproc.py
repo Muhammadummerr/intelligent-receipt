@@ -73,23 +73,33 @@ NEGATIVE_HINT = re.compile(r"\b(gst|tax|vat|discount|rounding|change)\b", re.IGN
 
 def soft_total_norm(s: str) -> str:
     s = norm_spaces(s or "")
-
-    # 🧹 remove currency symbols like RM, MYR, $, USD
+    
+    # 🧹 Remove currency symbols
     s = re.sub(r"(RM|MYR|\$|USD)\s*", "", s, flags=re.I)
-
-    # 🧹 remove other stray characters (only keep digits and dots)
-    s = re.sub(r"[^\d\.]", "", s)
-
-    # 🧮 find all 2-decimal numbers and choose the largest
-    nums = re.findall(r"\d{1,3}(?:[,\s]\d{3})*(?:\.\d{2})|\d+\.\d{2}", s)
+    
+    # 🧹 Merge OCR-split digits like "8 70" → "8.70" or "870"
+    s = re.sub(r"(\d)\s+(\d)", r"\1\2", s)
+    
+    # 🧹 Keep only digits, commas, dots
+    s = re.sub(r"[^\d\.,]", "", s)
+    
+    # 🧹 Normalize commas and spaces (turn "1,234.00" or "1 234.00" → "1234.00")
+    s = re.sub(r"[,\s]", "", s)
+    
+    # 🧮 Extract all decimal numbers
+    nums = re.findall(r"\d+\.\d{2}", s)
     if not nums:
         return ""
-
+    
     def _to_float(x: str) -> float:
-        return float(re.sub(r"[,\s]", "", x))
-
+        try:
+            return float(x)
+        except ValueError:
+            return 0.0
+    
     best = max(nums, key=_to_float)
     return f"{_to_float(best):.2f}"
+
 
 def pick_total_from_lines(lines):
     """
