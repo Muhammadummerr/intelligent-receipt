@@ -1,11 +1,17 @@
-# src/receipt_ie/infer/evaluate.py
 import os, json, argparse
 from typing import Dict, Optional, List
 from rapidfuzz import fuzz
-from ..utils.postproc import norm_spaces, norm_date, norm_total, clean_company,soft_addr_norm
+from ..postproc import (
+    clean_company,
+    soft_date_norm,
+    soft_total_norm,
+    soft_addr_norm,
+    norm_spaces,
+)
 
 PRED_EXTS = [".json", ".txt"]
 GT_EXTS = [".json", ".txt"]
+
 
 def _read_json_forgiving(path: str) -> Dict:
     for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
@@ -17,12 +23,14 @@ def _read_json_forgiving(path: str) -> Dict:
     with open(path, "rb") as f:
         return json.loads(f.read().decode("latin-1", errors="ignore"))
 
+
 def _find_with_ext(dirpath: str, stem: str, exts: List[str]) -> Optional[str]:
     for e in exts:
         p = os.path.join(dirpath, stem + e)
         if os.path.isfile(p):
             return p
     return None
+
 
 def load_gt(ent_dir: str, stem: str) -> Dict[str, str]:
     ent_path = _find_with_ext(ent_dir, stem, GT_EXTS)
@@ -39,11 +47,12 @@ def load_gt(ent_dir: str, stem: str) -> Dict[str, str]:
         return default
 
     return {
-        "company": pick(["company","vendor","merchant","store","company_name"]),
-        "date":    pick(["date","invoice_date","receipt_date"]),
-        "address": pick(["address","addr","location","address1","address_1"]),
-        "total":   pick(["total","amount","grand_total","total_amount","total_sales","total_sale"]),
+        "company": pick(["company", "vendor", "merchant", "store", "company_name"]),
+        "date": pick(["date", "invoice_date", "receipt_date"]),
+        "address": pick(["address", "addr", "location", "address1", "address_1"]),
+        "total": pick(["total", "amount", "grand_total", "total_amount", "total_sales", "total_sale"]),
     }
+
 
 def main(args):
     pred_dir = args.pred_dir
@@ -72,44 +81,38 @@ def main(args):
             print(f"⚠️ Skipping {s}: {e}")
             continue
 
-        # normalize
+        # --- Normalize both prediction & GT using same helpers ---
         p_norm = {
             "company": clean_company(p.get("company", "")),
-            "date": norm_date(p.get("date", "")),
+            "date": soft_date_norm(p.get("date", "")),
             "address": soft_addr_norm(p.get("address", "")),
-            "total": norm_total(p.get("total", "")),
+            "total": soft_total_norm(p.get("total", "")),
         }
         g_norm = {
             "company": clean_company(g.get("company", "")),
-            "date": norm_date(g.get("date", "")),
+            "date": soft_date_norm(g.get("date", "")),
             "address": soft_addr_norm(g.get("address", "")),
-            "total": norm_total(g.get("total", "")),
+            "total": soft_total_norm(g.get("total", "")),
         }
 
-
-        # exact matches
-        # exact or fuzzy matches (with relaxed address logic)
+        # --- Exact / fuzzy match counting ---
         for k in em_counts.keys():
+            score = fuzz.token_set_ratio(p_norm[k], g_norm[k])
             if k == "address":
-                # 🌟 Count fuzzy matches ≥ 85% as correct
-                if fuzz.token_set_ratio(p_norm[k], g_norm[k]) >= 85:
+                if score >= 85:
                     em_counts[k] += 1
             else:
-                if p_norm[k] == g_norm[k]:
+                if score >= 95:
                     em_counts[k] += 1
 
-
-        # fuzzy similarity
-        for k in fuzzy_scores.keys():
             if g_norm[k] or p_norm[k]:
-                score = fuzz.token_set_ratio(p_norm[k], g_norm[k])
                 fuzzy_scores[k].append(score)
 
         n += 1
 
     def pct(x): return 100.0 * x / max(1, n)
     print(f"\n📊 Evaluation Summary ({n} receipts)\n")
-    print("=== Exact-Match Accuracy ===")
+    print("=== Exact-Match (Fuzzy ≥ thresholds) ===")
     for k in em_counts:
         print(f"  {k:<8}: {em_counts[k]:>4}/{n:<4} ({pct(em_counts[k]):5.1f}%)")
 
@@ -118,11 +121,11 @@ def main(args):
         avg = sum(vals)/len(vals) if vals else 0.0
         print(f"  {k:<8}: {avg:5.1f}")
 
-    # Optional: overall fuzzy F1-style indicator
     all_fuzzy = sum(sum(v) for v in fuzzy_scores.values())
     all_counts = sum(len(v) for v in fuzzy_scores.values())
     avg_fuzzy = all_fuzzy / max(1, all_counts)
     print(f"\nOverall fuzzy mean similarity: {avg_fuzzy:5.1f}\n")
+
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
