@@ -128,13 +128,24 @@ def assign_lines_to_fields(lines: List[BoxLine], gt: EntityGT) -> Dict[int, str]
     ro_lines = sort_reading_order(lines)
 
     # --- Pass 1: DATE / TOTAL ---
+    # --- Pass 1: DATE / TOTAL ---
+    total_candidates = []
     for li in ro_lines:
         s = normalize_spaces(li.text)
         if is_date_like(s):
             mapping[id(li)] = "DATE"
             continue
-        if is_total_amount(s) is not None and re.search(r"\b(total|grand\s*total|amount\s*due|cash)\b", s, flags=re.I):
-            mapping[id(li)] = "TOTAL"
+
+        amt = is_total_amount(s)
+        if amt is not None and re.search(r"(total|grand\s*total|amount\s*due|cash)", s, flags=re.I):
+            total_candidates.append((amt, li, s))
+
+    # 🔹 Choose the strongest candidate: largest amount or last occurrence
+    if total_candidates:
+        # pick the bottom-most or largest numeric total
+        best_li = max(total_candidates, key=lambda x: (x[0], ro_lines.index(x[1])))[1]
+        mapping[id(best_li)] = "TOTAL"
+
 
     # --- Pass 2: COMPANY / ADDRESS (with cutoff logic) ---
     cutoff_triggered = False
