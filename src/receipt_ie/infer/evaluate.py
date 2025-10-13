@@ -1,7 +1,7 @@
 import os, json, argparse
 from typing import Dict, Optional, List
 from rapidfuzz import fuzz
-from ..postproc import (
+from ..utils.postproc import (
     clean_company,
     soft_date_norm,
     soft_total_norm,
