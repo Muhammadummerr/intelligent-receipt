@@ -20,3 +20,5 @@ lightning_logs/
 # vscode / IDE
 .vscode/
 .idea/
+
+.env
