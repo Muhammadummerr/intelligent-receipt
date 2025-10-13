@@ -18,28 +18,49 @@ from ..utils.postproc import clean_company, soft_addr_norm, norm_date, soft_tota
 
 def build_prompt(ocr_text: str, extracted: Dict[str, Any]) -> str:
     """
-    Construct the reasoning prompt for the LLM.
-    The prompt encourages structured reasoning and JSON-only output.
+    Construct a robust, structured reasoning prompt for the LLM.
+    Forces strict JSON-only output to avoid parsing failures.
     """
     return f"""
-You are a document reasoning assistant for receipts.
-Your task is to analyze the OCR text and the extracted fields (JSON)
-and return a corrected JSON with consistent values.
+You are a **document reasoning agent** specializing in analyzing scanned receipts.
 
-Follow these rules:
-1. If a field seems missing or incorrect, infer the most likely value from the OCR text.
-2. Always output valid JSON with keys: company, date, address, total.
-3. Do NOT include explanations — only the final JSON.
-4. Use currency or date context clues to infer totals and dates.
+Your input consists of:
+1. The full OCR-extracted text of a receipt.
+2. A partially extracted JSON of key fields (company, date, address, total).
 
-OCR TEXT:
+Your goal:
+- Validate and correct these fields.
+- Infer missing or incorrect values using the OCR text.
+- Maintain factual consistency (e.g., total should be a numeric value near the bottom).
+- Use Malaysian receipt context when relevant (RM, MYR, date formats, etc.).
+
+### Output Format (MUST FOLLOW EXACTLY):
+Return ONLY valid JSON — no explanations, no Markdown formatting, no commentary.
+The JSON must include these four fields exactly:
+
+{{
+  "company": "<string>",
+  "date": "<string>",
+  "address": "<string>",
+  "total": "<string>"
+}}
+
+### Additional Rules:
+- If a field is missing, infer it from context in OCR text.
+- If uncertain, leave the field blank (do not guess nonsense).
+- Use date patterns like DD/MM/YYYY or DD MMM YYYY.
+- The total is usually the largest monetary value near "TOTAL", "AMOUNT", or "RM".
+- The company is usually the first vendor name or logo-like word near the top.
+
+### OCR TEXT:
 {ocr_text.strip()}
 
-EXTRACTED JSON:
+### EXTRACTED JSON:
 {json.dumps(extracted, indent=2)}
 
-Now return the corrected JSON:
+Now return ONLY the corrected JSON in the specified format.
 """.strip()
+
 
 
 def normalize_refined_output(refined: Dict[str, Any]) -> Dict[str, str]:
