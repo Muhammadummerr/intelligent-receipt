@@ -23,11 +23,14 @@ def read_json_forgiving(path: str) -> Dict:
         try:
             with open(path, "r", encoding=enc) as f:
                 return json.load(f)
-        except UnicodeDecodeError:
+        except (UnicodeDecodeError, json.JSONDecodeError):
             continue
     with open(path, "rb") as f:
-        return json.loads(f.read().decode("latin-1", errors="ignore"))
-
+        try:
+            return json.loads(f.read().decode("latin-1", errors="ignore"))
+        except Exception:
+            return {}
+    
 
 def normalize_fields(j: Dict) -> Dict[str, str]:
     """Apply consistent normalization across both sources."""
@@ -77,7 +80,11 @@ def main(args):
     refined_dir = args.refined_dir
     gt_dir = args.gt_dir
 
-    stems = sorted([os.path.splitext(f)[0] for f in os.listdir(gt_dir) if f.endswith(".json")])
+    stems = sorted([
+        os.path.splitext(f)[0]
+        for f in os.listdir(gt_dir)
+        if f.lower().endswith(".json")
+    ])
     if not stems:
         print(f"⚠️ No ground truth files in {gt_dir}")
         return
