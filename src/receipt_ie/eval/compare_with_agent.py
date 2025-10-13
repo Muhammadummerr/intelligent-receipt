@@ -94,7 +94,7 @@ def main(args):
     for s in stems:
         pred_path = os.path.join(pred_dir, s + ".json")
         refined_path = os.path.join(refined_dir, s + ".json")
-        gt_path = os.path.join(gt_dir, s + ".json")
+        gt_path = os.path.join(gt_dir, s + ".txt")
 
         if not (os.path.isfile(pred_path) and os.path.isfile(refined_path) and os.path.isfile(gt_path)):
             continue
