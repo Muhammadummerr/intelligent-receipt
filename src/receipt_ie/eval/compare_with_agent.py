@@ -83,7 +83,7 @@ def main(args):
     stems = sorted([
         os.path.splitext(f)[0]
         for f in os.listdir(gt_dir)
-        if f.lower().endswith(".json")
+        if f.lower().endswith((".json", ".txt"))
     ])
     if not stems:
         print(f"⚠️ No ground truth files in {gt_dir}")
