@@ -210,12 +210,12 @@
 """
 train_layoutlmv3.py
 -------------------
-Fine-tunes LayoutLMv3 on receipt OCR data using entity annotations.
+Fine-tunes LayoutLMv3 for document information extraction on receipt OCR data.
 
 Config-driven training pipeline:
-  - Loads hyperparameters & paths from configs/default.yaml
-  - Uses Hugging Face Trainer for training + evaluation
-  - Automatically saves best model & processor
+- Loads hyperparameters & paths from configs/default.yaml
+- Uses Dataset + Collator from src/receipt_ie/data
+- Saves best model and processor for inference
 """
 
 import os
@@ -228,55 +228,54 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
-from src.receipt_ie.data.dataset_layoutlmv3 import ReceiptDataset
-from src.receipt_ie.data.collate import DataCollatorForLayoutLMv3
+from src.receipt_ie.data.dataset_layoutlmv3 import ReceiptLayoutLMv3Dataset
+from src.receipt_ie.data.collate import identity_collate
 from src.receipt_ie.data.align import LABELS, LABEL2ID
 
 
-# ------------------------------
-# Load YAML Config
-# ------------------------------
-def load_config(config_path: str = "configs/default.yaml"):
-    with open(config_path, "r", encoding="utf-8") as f:
+# -----------------------------------------------------
+# Load configuration
+# -----------------------------------------------------
+def load_config(cfg_path="configs/default.yaml"):
+    with open(cfg_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
-# ------------------------------
-# Training Entrypoint
-# ------------------------------
+# -----------------------------------------------------
+# Training Entry Point
+# -----------------------------------------------------
 def main():
     cfg = load_config()
     set_seed(cfg["seed"])
 
-    # --- Directories ---
     data_cfg = cfg["data"]
     model_cfg = cfg["model"]
-    logging_cfg = cfg["logging"]
+    log_cfg = cfg["logging"]
 
-    out_dir = os.path.join(logging_cfg.get("out_dir", "./outputs"), "checkpoints")
-    os.makedirs(out_dir, exist_ok=True)
+    output_dir = os.path.join(log_cfg.get("out_dir", "./outputs"), "checkpoints")
+    os.makedirs(output_dir, exist_ok=True)
 
-    # --- Initialize Processor & Datasets ---
+    # --- Initialize processor ---
     model_name = "microsoft/layoutlmv3-base"
     processor = LayoutLMv3Processor.from_pretrained(model_name)
 
-    print("📂 Loading training and validation datasets...")
-    train_ds = ReceiptDataset(
+    print("📂 Loading training & validation datasets...")
+    train_ds = ReceiptLayoutLMv3Dataset(
         img_dir=data_cfg["train_img_dir"],
         box_dir=data_cfg["train_box_dir"],
         ent_dir=data_cfg["train_entities_dir"],
         processor=processor,
-        split="train"
+        max_seq_len=model_cfg["max_seq_len"],
     )
-    val_ds = ReceiptDataset(
+    val_ds = ReceiptLayoutLMv3Dataset(
         img_dir=data_cfg["train_img_dir"],
         box_dir=data_cfg["train_box_dir"],
         ent_dir=data_cfg["train_entities_dir"],
         processor=processor,
-        split="val"
+        max_seq_len=model_cfg["max_seq_len"],
     )
 
-    # --- Model Initialization ---
+    # --- Initialize model ---
     model = LayoutLMv3ForTokenClassification.from_pretrained(
         model_name,
         num_labels=len(LABELS),
@@ -284,12 +283,12 @@ def main():
         label2id=LABEL2ID,
     )
 
-    # --- Data Collator ---
-    collator = DataCollatorForLayoutLMv3(processor)
+    # --- Data collator ---
+    data_collator = identity_collate  # ✅ your defined collate function
 
-    # --- Training Arguments ---
+    # --- Training arguments ---
     args = TrainingArguments(
-        output_dir=out_dir,
+        output_dir=output_dir,
         evaluation_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=1 if model_cfg.get("save_best_only", True) else 3,
@@ -298,39 +297,37 @@ def main():
         per_device_train_batch_size=model_cfg["batch_size"],
         per_device_eval_batch_size=model_cfg["batch_size"],
         num_train_epochs=model_cfg["epochs"],
-        gradient_accumulation_steps=1,
-        max_steps=-1,
         fp16=torch.cuda.is_available(),
+        logging_dir=os.path.join(log_cfg.get("out_dir", "./outputs"), "logs"),
+        logging_steps=50,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
-        logging_dir=os.path.join(logging_cfg.get("out_dir", "./outputs"), "logs"),
-        logging_steps=50,
-        report_to="none",  # disable WandB for Kaggle
+        report_to="none",
     )
 
-    # --- Trainer ---
+    # --- Trainer setup ---
     trainer = Trainer(
         model=model,
         args=args,
         train_dataset=train_ds,
         eval_dataset=val_ds,
         tokenizer=processor.tokenizer,
-        data_collator=collator,
+        data_collator=data_collator,
     )
 
-    # --- Train ---
+    # --- Training ---
     print("🚀 Starting training...")
     trainer.train()
-    print("✅ Training complete!")
+    print("✅ Training complete.")
 
-    # --- Save final model & processor ---
-    final_out = os.path.join(logging_cfg.get("out_dir", "./outputs"), "final")
-    os.makedirs(final_out, exist_ok=True)
+    # --- Save best model + processor ---
+    final_dir = os.path.join(log_cfg.get("out_dir", "./outputs"), "final")
+    os.makedirs(final_dir, exist_ok=True)
 
-    trainer.save_model(final_out)
-    processor.save_pretrained(final_out)
+    trainer.save_model(final_dir)
+    processor.save_pretrained(final_dir)
 
-    print(f"🏁 Model and processor saved to: {final_out}")
+    print(f"🏁 Model and processor saved to: {final_dir}")
 
 
 if __name__ == "__main__":
