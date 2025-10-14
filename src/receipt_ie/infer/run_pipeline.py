@@ -125,30 +125,15 @@ run_pipeline.py
 End-to-end pipeline for intelligent receipt understanding.
 
 Steps:
-1) LayoutLMv3 (Part 1) extracts preliminary fields (company, date, address, total).
-2) LLM Reasoning Agent (Part 2) validates, corrects, and adds a short agent_comment.
-3) Outputs normalized JSON ready for Part 3 evaluation / demo.
-
-This file is intentionally robust:
-- Strict, schema-like prompt
-- Safe JSON parsing (recovers from common LLM formatting hiccups)
-- Always returns agent_comment
-"""
-
-"""
-run_pipeline.py
----------------
-End-to-end pipeline for intelligent receipt understanding.
-
-Steps:
-1️⃣ Use LayoutLMv3 (Part 1) to extract key fields (company, date, address, total).
-2️⃣ Use GPT-based Reasoning Agent (Part 2) to refine and validate those fields.
-3️⃣ Return a final JSON with an additional `agent_comment` summarizing reasoning.
+1️⃣ LayoutLMv3 (Part 1) extracts key fields (company, date, address, total).
+2️⃣ LLM Reasoning Agent (Part 2) validates, corrects, and adds agent_comment.
+3️⃣ Returns normalized JSON ready for integration or evaluation.
 
 This version includes:
-✅ Safe JSON parsing (handles malformed model output)
+✅ Safe JSON parsing (handles malformed outputs)
 ✅ Retry logic for Groq/API instability
-✅ Strict prompt structure for better JSON adherence
+✅ Auto processor fallback (fixes OSError)
+✅ Strict JSON schema prompt
 ✅ Deterministic output (temperature=0)
 """
 
@@ -160,20 +145,13 @@ import argparse
 from typing import Dict, Any
 
 from ..utils.llm_client import LLMClient
-from ..utils.postproc import (
-    clean_company, soft_addr_norm, norm_date, soft_total_norm
-)
+from ..utils.postproc import clean_company, soft_addr_norm, norm_date, soft_total_norm
 from .predict_layoutlmv3 import run_inference_single
 
 
-# ------------------------------ Utilities ------------------------------ #
+# ------------------------------ Safe JSON Loader ------------------------------ #
 def safe_json_loads(text: str) -> Dict[str, Any]:
-    """
-    Parse JSON safely:
-      - first try direct json.loads
-      - if it fails, extract the largest {...} block and try again
-      - if still fails, return {}
-    """
+    """Safely parse LLM outputs into JSON."""
     if not isinstance(text, str):
         return {}
     text = text.strip()
@@ -182,12 +160,9 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
     except Exception:
         pass
 
-    # Try to extract the first JSON-like block
     match = re.search(r"\{.*\}", text, flags=re.S)
     if match:
-        candidate = match.group(0)
-        # Minimal repair: remove trailing commas and fix quotes
-        candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
+        candidate = re.sub(r",\s*([}\]])", r"\1", match.group(0))
         candidate = candidate.replace("\n", " ").replace("\r", "")
         try:
             return json.loads(candidate)
@@ -200,8 +175,7 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
 def build_reasoning_prompt(ocr_text: str, extracted: Dict[str, Any]) -> str:
     """
     Schema-oriented prompt enforcing strict JSON output with exact keys.
-    This prompt works reliably with GPT and open models like Groq.
-    
+    Includes few-shot examples for open models like Groq.
     """
 
     few_shot_examples = """
@@ -215,17 +189,8 @@ TEL : 03-87686092
 FAX : 03-87686092
 GST ID : 000781500416
 TAX INVOICE
-BILL TO : SUCI ALAM JAYA TRANSPORT
-NO 1 JALAN AMAN 2
-TAMAN DESA 43800
-DENGKIL SELANGOR
-DOC NO.: CS00012013
 DATE: 20/04/2018
-TIME: 16:03:00
 TOTAL SALES (INCLUSIVE OF GST): 87.45
-CASH: 87.45
-CHANGE: 0.00
-GOODS SOLD ARE NOT RETURNABLE, THANK YOU
 
 EXTRACTED_JSON:
 {
@@ -241,7 +206,7 @@ EXPECTED_OUTPUT:
   "date": "20/04/2018",
   "address": "LOT 276 JALAN BANTING 43800 DENGKIL, SELANGOR",
   "total": "87.45",
-  "agent_comment": "All fields were inferred directly from clear OCR lines."
+  "agent_comment": "All fields inferred directly from OCR lines."
 }
 
 ---
@@ -253,7 +218,6 @@ TAX INVOICE
 Date: 02/01/2020
 Shop 12, Main Street, Kuala Lumpur
 TOTAL: RM 15.90
-Thank you and please come again!
 
 EXTRACTED_JSON:
 {
@@ -269,40 +233,37 @@ EXPECTED_OUTPUT:
   "date": "02/01/2020",
   "address": "Shop 12, Main Street, Kuala Lumpur",
   "total": "15.90",
-  "agent_comment": "Company inferred from top OCR line containing 'McDonald's'; total value derived from 'TOTAL RM' pattern."
+  "agent_comment": "Company inferred from OCR context; total extracted from 'TOTAL RM' line."
 }
 """.strip()
-
 
     return f"""
 You are a receipt reasoning AI.
 
 INPUTS:
 1) OCR_TEXT: raw text from the receipt.
-2) EXTRACTED_JSON: the model's initial output.
+2) EXTRACTED_JSON: preliminary structured output.
 
-YOUR TASK:
-- Review EXTRACTED_JSON in light of the OCR_TEXT.
+TASK:
 - Correct or fill missing fields using clues in OCR_TEXT.
-- Ensure JSON keys: company, date, address, total, agent_comment.
-- Do NOT add extra keys, text, or markdown.
+- Ensure the output JSON has EXACT keys:
+  ["company", "date", "address", "total", "agent_comment"].
+- Do NOT include explanations or markdown outside the JSON.
 
 RULES:
-- "company": business/vendor name (often near top).
-- "date": use a plausible format (DD/MM/YYYY or DD MMM YYYY).
-- "address": store or branch location.
-- "total": largest numeric value near TOTAL, AMOUNT, RM, MYR, or $.
-- "agent_comment": 1–2 sentences summarizing corrections (if any).
-- If uncertain, leave the field blank.
+- company → vendor name (usually top).
+- date → main receipt date (DD/MM/YYYY).
+- address → store or branch location.
+- total → largest numeric value near TOTAL / AMOUNT / RM.
+- agent_comment → one short sentence describing your correction.
 
-Return ONLY valid JSON with these exact keys.
-Follow the structure of the examples below.
+Follow the format of the examples below.
 
 {few_shot_examples}
 
 ---
-### NEW RECEIPT TO PROCESS
 
+### NEW RECEIPT TO PROCESS
 OCR_TEXT:
 {ocr_text.strip()}
 
@@ -315,63 +276,58 @@ FINAL JSON OUTPUT:
 
 # ------------------------------ Normalization ------------------------------ #
 def normalize_refined_output(refined: Dict[str, Any]) -> Dict[str, str]:
-    """Normalize all fields for consistency with evaluation pipeline."""
+    """Normalize all LLM outputs and guarantee a valid agent_comment."""
     out = {
         "company": clean_company(refined.get("company", "")),
         "date": norm_date(refined.get("date", "")),
         "address": soft_addr_norm(refined.get("address", "")),
         "total": soft_total_norm(refined.get("total", "")),
     }
-    # Ensure a comment always exists
     comment = refined.get("agent_comment", "")
     if not isinstance(comment, str):
         comment = str(comment)
-    comment = comment.strip() or "No notable corrections were required."
-    out["agent_comment"] = comment
+    out["agent_comment"] = comment.strip() or "No notable corrections required."
     return out
 
 
-# ------------------------------ Main Pipeline ------------------------------ #
-def run_pipeline_single(
-    image_path: str,
-    model_dir: str,
-    llm_provider: str = "openai",
-    llm_model: str = "gpt-4-turbo",
-) -> Dict[str, Any]:
-    """
-    Full pipeline:
-      1. LayoutLMv3 extraction
-      2. LLM reasoning & validation
-      3. Normalized JSON output
-    """
+# ------------------------------ Pipeline Core ------------------------------ #
+def run_pipeline_single(image_path: str, model_dir: str, llm_provider="openai", llm_model="gpt-4-turbo") -> Dict[str, Any]:
+    """Run the full pipeline on a single receipt."""
     print(f"🔍 Processing: {os.path.basename(image_path)}")
 
-    # Step 1 — LayoutLMv3 extraction
-    extracted, ocr_text = run_inference_single(image_path, model_dir)
-    print("✅ Step 1 complete: LayoutLMv3 extracted raw fields.")
+    # Step 1 — LayoutLMv3 inference (with auto processor fallback)
+    try:
+        extracted, ocr_text = run_inference_single(image_path, model_dir)
+    except Exception as e:
+        print(f"⚠️ Processor loading failed: {e}")
+        print("🔁 Loading base LayoutLMv3 processor as fallback.")
+        from transformers import LayoutLMv3Processor
+        base_proc = LayoutLMv3Processor.from_pretrained("microsoft/layoutlmv3-base", apply_ocr=False)
+        base_proc.save_pretrained(model_dir)
+        extracted, ocr_text = run_inference_single(image_path, model_dir)
+    print("✅ Step 1 complete: Extracted raw fields.")
 
-    # Step 2 — Generative refinement
+    # Step 2 — Reasoning with LLM
     llm = LLMClient(provider=llm_provider, model=llm_model, temperature=0.0)
     prompt = build_reasoning_prompt(ocr_text, extracted)
 
     refined = None
-    for attempt in range(3):  # retry up to 3 times for reliability
+    for attempt in range(3):
         try:
             response = llm.generate(prompt)
             refined = safe_json_loads(response)
             if refined and isinstance(refined, dict):
                 break
-            else:
-                print(f"⚠️ Attempt {attempt+1}: invalid or empty response.")
+            print(f"⚠️ Attempt {attempt+1}: invalid LLM response.")
         except Exception as e:
             print(f"⚠️ Attempt {attempt+1} failed: {e}")
             time.sleep(2)
 
-    if not refined or not isinstance(refined, dict):
-        refined = {**extracted, "agent_comment": "LLM fallback — invalid or empty response."}
+    if not refined:
+        refined = {**extracted, "agent_comment": "LLM fallback — invalid output."}
 
     final_output = normalize_refined_output(refined)
-    print("✅ Step 2 complete: Reasoning & validation finished.")
+    print("✅ Step 2 complete: Reasoning and validation finished.")
     return final_output
 
 
@@ -379,14 +335,13 @@ def run_pipeline_single(
 def main():
     parser = argparse.ArgumentParser(description="End-to-end receipt understanding pipeline.")
     parser.add_argument("--image_path", required=True, help="Path to receipt image")
-    parser.add_argument("--model_dir", required=True, help="Directory of fine-tuned LayoutLMv3 model")
-    parser.add_argument("--out_path", required=True, help="Output JSON save path")
+    parser.add_argument("--model_dir", required=True, help="Fine-tuned LayoutLMv3 model directory")
+    parser.add_argument("--out_path", required=True, help="Path to save final JSON")
     parser.add_argument("--provider", default="openai", help="LLM provider: openai | huggingface | groq")
-    parser.add_argument("--model", default="gpt-4-turbo", help="LLM model (e.g., gpt-4-turbo, openai/gpt-oss-120b)")
+    parser.add_argument("--model", default="gpt-4-turbo", help="LLM model name")
     args = parser.parse_args()
 
     result = run_pipeline_single(args.image_path, args.model_dir, args.provider, args.model)
-
     os.makedirs(os.path.dirname(args.out_path), exist_ok=True)
     with open(args.out_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
