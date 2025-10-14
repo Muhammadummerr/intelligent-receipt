@@ -77,7 +77,7 @@ def normalize_refined_output(refined: Dict[str, Any]) -> Dict[str, str]:
 
 
 def run_reasoning_agent(pred_dir: str, ocr_dir: str, out_dir: str,
-                        provider: str = "openai", model: str = "gpt-4-turbo"):
+                        provider: str = "groq", model: str = "openai/gpt-oss-120b"):
     """
     Main pipeline: load each predicted JSON, read OCR text, run reasoning,
     and save corrected JSONs to `out_dir`.
