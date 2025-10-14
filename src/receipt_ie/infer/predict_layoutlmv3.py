@@ -124,6 +124,81 @@ def main(args):
         for r in all_out:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
+# ----------------------------------------------------------------------
+# 🔹 Single-image inference helper for run_pipeline.py
+# ----------------------------------------------------------------------
+def run_inference_single(image_path: str, model_dir: str):
+    """
+    Run LayoutLMv3 on a single image and return:
+      - extracted_fields (dict)
+      - ocr_text (string)
+    """
+    from transformers import LayoutLMv3Processor, LayoutLMv3ForTokenClassification
+    from PIL import Image
+    import torch
+    import json
+    import os
+
+    # --- Load model + processor ---
+    processor = LayoutLMv3Processor.from_pretrained(model_dir)
+    model = LayoutLMv3ForTokenClassification.from_pretrained(model_dir)
+    model.eval()
+
+    # --- Load image ---
+    image = Image.open(image_path).convert("RGB")
+
+    # --- Find corresponding OCR box file ---
+    stem = os.path.splitext(os.path.basename(image_path))[0]
+    box_path = f"/kaggle/input/receipt-dataset/test/box/{stem}.txt"
+    if not os.path.exists(box_path):
+        raise FileNotFoundError(f"Missing OCR boxes for {stem}")
+
+    with open(box_path, "r", encoding="utf-8", errors="ignore") as f:
+        ocr_lines = f.readlines()
+
+    words, boxes = [], []
+    for line in ocr_lines:
+        parts = line.strip().split(",")
+        if len(parts) < 9:
+            continue
+        coords = list(map(int, parts[:8]))
+        text = ",".join(parts[8:]).strip()
+        words.append(text)
+        # approximate bounding box normalization (if LayoutLMv3 expects 0–1000)
+        xmin, ymin, xmax, ymax = coords[0], coords[1], coords[4], coords[5]
+        boxes.append([xmin, ymin, xmax, ymax])
+
+    # --- Prepare inputs for LayoutLMv3 ---
+    inputs = processor(image, words, boxes=boxes, return_tensors="pt", truncation=True)
+    with torch.no_grad():
+        outputs = model(**inputs)
+        predictions = outputs.logits.argmax(-1).squeeze().tolist()
+        label_map = model.config.id2label
+
+    # --- Build extracted fields ---
+    tokens = processor.tokenizer.convert_ids_to_tokens(inputs["input_ids"].squeeze())
+    fields = {"company": "", "date": "", "address": "", "total": ""}
+
+    current_field = None
+    for token, pred in zip(tokens, predictions):
+        label = label_map[pred]
+        if label.startswith("B-"):
+            current_field = label.split("-")[1].lower()
+            fields[current_field] += " " + token.replace("##", "")
+        elif label.startswith("I-") and current_field:
+            fields[current_field] += " " + token.replace("##", "")
+        else:
+            current_field = None
+
+    # --- Join and clean up ---
+    for k, v in fields.items():
+        fields[k] = v.strip().replace(" ##", "")
+
+    # --- Return both fields and raw OCR text ---
+    ocr_text = "\n".join(words)
+    return fields, ocr_text
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_root", required=True)
