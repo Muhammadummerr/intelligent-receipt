@@ -18,39 +18,44 @@ from ..utils.postproc import clean_company, soft_addr_norm, norm_date, soft_tota
 
 def build_prompt(ocr_text: str, extracted: Dict[str, Any]) -> str:
     """
-    Construct a robust, structured reasoning prompt for the LLM.
-    Forces strict JSON-only output to avoid parsing failures.
+    Optimized reasoning prompt for LLM-based receipt correction.
+    Enforces strict JSON structure and adds self-check instructions
+    to minimize parsing errors and hallucinations.
     """
     return f"""
-You are a **document reasoning agent** specializing in analyzing scanned receipts.
+You are a **document reasoning agent** that processes scanned receipts.
 
-Your input consists of:
-1. The full OCR-extracted text of a receipt.
-2. A partially extracted JSON of key fields (company, date, address, total).
+### TASK OVERVIEW
+You are given:
+1. **OCR text** from the receipt (raw extracted text).
+2. **Partially extracted fields** in JSON form (company, date, address, total).
 
-Your goal:
-- Validate and correct these fields.
-- Infer missing or incorrect values using the OCR text.
-- Maintain factual consistency (e.g., total should be a numeric value near the bottom).
-- Use Malaysian receipt context when relevant (RM, MYR, date formats, etc.).
+Your task:
+- Review the OCR text and correct any incorrect or missing fields in the JSON.
+- Ensure all 4 fields are logically consistent and realistic.
+- Do NOT fabricate data — if a value cannot be found, leave it as an empty string ("").
+- Follow Malaysian formatting conventions (e.g., dates, currency "RM").
 
-### Output Format (MUST FOLLOW EXACTLY):
-Return ONLY valid JSON — no explanations, no Markdown formatting, no commentary.
-The JSON must include these four fields exactly:
+### OUTPUT INSTRUCTIONS (MUST FOLLOW STRICTLY)
+- Output **ONLY valid JSON** — no Markdown, no explanations, no commentary.
+- The JSON must have exactly these 4 keys, spelled exactly:
+  - company
+  - date
+  - address
+  - total
+- Each value must be a string (even if numeric).
+- The total should contain the numeric amount (e.g., "32.50"), not "RM32.50".
 
-{{
-  "company": "<string>",
-  "date": "<string>",
-  "address": "<string>",
-  "total": "<string>"
-}}
+### VALIDATION RULES
+- **Company:** Usually near the top, may include "SDN BHD", "ENTERPRISE", or logo-like text.
+- **Date:** Must resemble DD/MM/YYYY, DD-MM-YYYY, or DD MMM YYYY.
+- **Address:** Should include street or area terms like "JALAN", "TAMAN", "KUALA LUMPUR", etc.
+- **Total:** Should be the largest number near the words "TOTAL", "CASH", "AMOUNT DUE", or "RM".
 
-### Additional Rules:
-- If a field is missing, infer it from context in OCR text.
-- If uncertain, leave the field blank (do not guess nonsense).
-- Use date patterns like DD/MM/YYYY or DD MMM YYYY.
-- The total is usually the largest monetary value near "TOTAL", "AMOUNT", or "RM".
-- The company is usually the first vendor name or logo-like word near the top.
+### SELF-CHECK BEFORE RETURNING:
+1. Ensure all 4 keys exist.
+2. Ensure it is **valid JSON** (parseable by Python json.loads).
+3. Do not include any text before or after the JSON (no explanations).
 
 ### OCR TEXT:
 {ocr_text.strip()}
@@ -58,8 +63,9 @@ The JSON must include these four fields exactly:
 ### EXTRACTED JSON:
 {json.dumps(extracted, indent=2)}
 
-Now return ONLY the corrected JSON in the specified format.
+Now return ONLY the corrected JSON that meets all the above rules.
 """.strip()
+
 
 
 
