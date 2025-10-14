@@ -257,7 +257,7 @@ def main():
 
     # --- Initialize processor ---
     model_name = "microsoft/layoutlmv3-base"
-    processor = LayoutLMv3Processor.from_pretrained(model_name)
+    processor = LayoutLMv3Processor.from_pretrained(model_name,apply_ocr=False)
 
     print("📂 Loading training & validation datasets...")
     train_ds = ReceiptLayoutLMv3Dataset(
@@ -284,7 +284,7 @@ def main():
     )
 
     # --- Data collator ---
-    data_collator = identity_collate  # ✅ your defined collate function
+    data_collator = identity_collate 
 
     # --- Training arguments ---
     args = TrainingArguments(
