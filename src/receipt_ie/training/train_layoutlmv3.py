@@ -4,7 +4,7 @@ train_layoutlmv3.py
 Fine-tunes LayoutLMv3 for document information extraction on receipt OCR data.
 
 This version adds:
-✅ Class-weighted loss for label imbalance
+✅ Class-weighted loss for label imbalance (via custom Trainer)
 ✅ Token-label alignment sanity check
 ✅ F1-score metric during evaluation
 ✅ OCR caching + dynamic OCR (EasyOCR)
@@ -38,15 +38,41 @@ def load_config(cfg_path="configs/default.yaml"):
 
 
 # -----------------------------------------------------
-# Custom compute_metrics for Trainer
+# Metrics
 # -----------------------------------------------------
 def compute_metrics(p):
+    # p.predictions: (batch, seq, num_labels)
     preds = np.argmax(p.predictions, axis=-1).flatten()
     labels = p.label_ids.flatten()
     mask = labels != -100
     preds, labels = preds[mask], labels[mask]
-    precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average="micro", zero_division=0)
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        labels, preds, average="micro", zero_division=0
+    )
     return {"precision": precision, "recall": recall, "f1": f1}
+
+
+class WeightedLossTrainer(Trainer):
+    """
+    Custom Trainer that applies class-weighted CrossEntropyLoss.
+    """
+    def __init__(self, *args, class_weights=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.class_weights = class_weights
+
+    def compute_loss(self, model, inputs, return_outputs=False):
+        # Standard HF keys: input_ids, attention_mask, bbox, pixel_values, labels
+        labels = inputs.get("labels")
+        outputs = model(**{k: v for k, v in inputs.items() if k != "labels"})
+        logits = outputs.get("logits")  # (B, T, C)
+
+        # Class-weighted CE, ignore_index=-100 for padding tokens
+        loss_fct = torch.nn.CrossEntropyLoss(
+            weight=self.class_weights.to(logits.device) if self.class_weights is not None else None,
+            ignore_index=-100,
+        )
+        loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
+        return (loss, outputs) if return_outputs else loss
 
 
 # -----------------------------------------------------
@@ -59,6 +85,8 @@ def main():
     data_cfg = cfg["data"]
     model_cfg = cfg["model"]
     log_cfg = cfg["logging"]
+
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")  # silence fork warning
 
     output_dir = os.path.join(log_cfg.get("out_dir", "./outputs"), "checkpoints")
     os.makedirs(output_dir, exist_ok=True)
@@ -74,7 +102,7 @@ def main():
         processor=processor,
         max_seq_len=model_cfg["max_seq_len"],
         use_easyocr=True,
-        cache_dir="./ocr_cache"
+        cache_dir="./ocr_cache",
     )
     val_ds = ReceiptLayoutLMv3Dataset(
         img_dir=data_cfg["train_img_dir"],
@@ -83,27 +111,29 @@ def main():
         processor=processor,
         max_seq_len=model_cfg["max_seq_len"],
         use_easyocr=True,
-        cache_dir="./ocr_cache"
+        cache_dir="./ocr_cache",
     )
 
     # -------------------------------------------------
-    # 🧠 Sanity check: verify labels aren't all "O"
+    # 🔍 Label distribution sanity check
     # -------------------------------------------------
-    print("🔍 Checking label distribution...")
+    print("🔍 Checking label distribution (sample of train set)...")
     label_counts = Counter()
-    for i in range(min(50, len(train_ds))):  # just sample 50 to save time
+    sample_n = min(200, len(train_ds))  # increase if fast enough
+    for i in range(sample_n):
         sample = train_ds[i]
         labels = sample["labels"].numpy().tolist()
         label_counts.update([l for l in labels if l != -100])
     inv_map = {v: k for k, v in LABEL2ID.items()}
     for k, v in label_counts.most_common():
-        print(f"{inv_map[k]:<12}: {v}")
-
-    if label_counts.get(LABEL2ID["O"], 0) / sum(label_counts.values()) > 0.95:
-        print("⚠️ Warning: >95% of tokens are 'O' — model may not learn entities properly!")
+        print(f"{inv_map.get(k, k):<12}: {v}")
+    total_labeled = sum(label_counts.values()) or 1
+    frac_o = label_counts.get(LABEL2ID["O"], 0) / total_labeled
+    if frac_o > 0.95:
+        print("⚠️ Warning: >95% of tokens are 'O' — entity signal is very sparse. Consider improving alignment/labels.")
 
     # -------------------------------------------------
-    # Model init
+    # Model init (no monkey-patching!)
     # -------------------------------------------------
     model = LayoutLMv3ForTokenClassification.from_pretrained(
         model_name,
@@ -113,23 +143,16 @@ def main():
     )
 
     # -------------------------------------------------
-    # Weighted loss (to fix imbalance)
+    # Class weights from label distribution
     # -------------------------------------------------
-    class_weights = torch.ones(len(LABELS))
+    class_weights = torch.ones(len(LABELS), dtype=torch.float)
     o_weight = label_counts.get(LABEL2ID["O"], 1)
     for label, idx in LABEL2ID.items():
         if label != "O":
-            class_weights[idx] = o_weight / max(label_counts.get(idx, 1), 1)
-    print("⚖️ Using class weights:", class_weights.tolist())
-
-    # Replace model loss_fn
-    def custom_loss_fn(outputs, labels):
-        logits = outputs.logits.view(-1, len(LABELS))
-        loss_fct = torch.nn.CrossEntropyLoss(weight=class_weights.to(logits.device), ignore_index=-100)
-        return loss_fct(logits, labels.view(-1))
-
-    model.forward = lambda **kwargs: model._forward(**kwargs) if hasattr(model, "_forward") else model.__call__(**kwargs)
-    model.compute_loss = custom_loss_fn
+            # inverse-frequency-ish; clamp to keep things stable
+            w = o_weight / max(label_counts.get(idx, 1), 1)
+            class_weights[idx] = float(np.clip(w, 1.0, 50.0))
+    print("⚖️ Using class weights:", [round(x, 3) for x in class_weights.tolist()])
 
     # -------------------------------------------------
     # Training setup
@@ -154,7 +177,7 @@ def main():
         report_to="none",
     )
 
-    trainer = Trainer(
+    trainer = WeightedLossTrainer(
         model=model,
         args=args,
         train_dataset=train_ds,
@@ -162,6 +185,7 @@ def main():
         tokenizer=processor.tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
+        class_weights=class_weights,
     )
 
     print("🚀 Starting training...")
