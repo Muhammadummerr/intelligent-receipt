@@ -16,7 +16,7 @@ from ..utils.postproc import (
     pick_total_from_lines,
     clean_company,
 )
-from ..infer.run_pipeline import load_model_and_processor
+# from ..infer.run_pipeline import load_model_and_processor
 
 # ---------------------------------------------------------------------- #
 # Auto switch: local folder or Hugging Face Hub
