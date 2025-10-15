@@ -292,11 +292,11 @@ class ReceiptLayoutLMv3Dataset:
         mapping = assign_lines_to_fields(box_lines, ent)
 
         
-        print(f"\n📦 {stem}: loaded {len(box_lines)} OCR lines.")
-        if len(box_lines) > 0:
-            print("  Example OCR line:", box_lines[0].text)
-        if len(mapping) == 0:
-            print("⚠️ No field mapping found — all labels may become 'O'.")
+        # print(f"\n📦 {stem}: loaded {len(box_lines)} OCR lines.")
+        # if len(box_lines) > 0:
+        #     print("  Example OCR line:", box_lines[0].text)
+        # if len(mapping) == 0:
+        #     print("⚠️ No field mapping found — all labels may become 'O'.")
 
         words, boxes, labels = [], [], []
 
