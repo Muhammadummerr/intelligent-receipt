@@ -105,9 +105,9 @@ def main():
         cache_dir="./ocr_cache",
     )
     val_ds = ReceiptLayoutLMv3Dataset(
-        img_dir=data_cfg["train_img_dir"],
-        box_dir=data_cfg["train_box_dir"],
-        ent_dir=data_cfg["train_entities_dir"],
+        img_dir=data_cfg["test_img_dir"],
+        box_dir=data_cfg["test_box_dir"],
+        ent_dir=data_cfg["test_entities_dir"],
         processor=processor,
         max_seq_len=model_cfg["max_seq_len"],
         use_easyocr=False,

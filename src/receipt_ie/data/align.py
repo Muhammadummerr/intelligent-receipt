@@ -172,9 +172,9 @@ def assign_lines_to_fields(lines, gt):
         else:
             mapping[id(li)] = "TOTAL"
 
-    mapped = sum(1 for v in mapping.values() if v)
-    missed = len(lines) - mapped
-    print(f"🧾 Debug summary: {mapped} mapped, {missed} missed.")
+    # mapped = sum(1 for v in mapping.values() if v)
+    # missed = len(lines) - mapped
+    # print(f"🧾 Debug summary: {mapped} mapped, {missed} missed.")
     return mapping
 
 
