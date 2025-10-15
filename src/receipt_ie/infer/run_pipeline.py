@@ -148,6 +148,21 @@ from ..utils.llm_client import LLMClient
 from ..utils.postproc import clean_company, soft_addr_norm, norm_date, soft_total_norm
 from .predict_layoutlmv3 import run_inference_single
 
+import os
+from transformers import LayoutLMv3Processor, LayoutLMv3ForTokenClassification
+
+def load_model_and_processor(model_dir_or_hub: str):
+    """Load from local folder if exists, else from Hugging Face Hub."""
+    if os.path.isdir(model_dir_or_hub):
+        print(f"📦 Loading local model from {model_dir_or_hub}")
+        processor = LayoutLMv3Processor.from_pretrained(model_dir_or_hub, apply_ocr=False)
+        model = LayoutLMv3ForTokenClassification.from_pretrained(model_dir_or_hub)
+    else:
+        print(f"☁️ Loading model from Hugging Face Hub: {model_dir_or_hub}")
+        processor = LayoutLMv3Processor.from_pretrained(model_dir_or_hub, apply_ocr=False)
+        model = LayoutLMv3ForTokenClassification.from_pretrained(model_dir_or_hub)
+    return processor, model
+
 
 # ------------------------------ Safe JSON Loader ------------------------------ #
 def safe_json_loads(text: str) -> Dict[str, Any]:
