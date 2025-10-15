@@ -284,7 +284,7 @@ class ReceiptLayoutLMv3Dataset:
         stem, image, W, H, lines, ent = self._read_item(idx)
 
         
-        box_lines = [BoxLine(text=li["text"], aabb=li["aabb"]) for li in lines]
+        box_lines = [BoxLine(li["text"], li["aabb"]) for li in lines]
 
         
         mapping = assign_lines_to_fields(box_lines, ent)
