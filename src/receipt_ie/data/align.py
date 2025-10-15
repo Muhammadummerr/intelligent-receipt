@@ -125,62 +125,56 @@ def choose_field_for_line(line: str, gt: EntityGT, line_idx: int = 0, total_line
 # ------------------------------------------------------------------
 # MAIN MAPPING FUNCTION
 # ------------------------------------------------------------------
-def assign_lines_to_fields(lines: List[BoxLine], gt: EntityGT) -> Dict[int, str]:
-    mapping: Dict[int, str] = {}
-    ro_lines = sort_reading_order(lines)
+def assign_lines_to_fields(lines, gt):
+    """
+    Robust fuzzy + positional mapping for COMPANY, DATE, ADDRESS, TOTAL.
+    Returns {id(line): field_name}.
+    """
+    mapping = {}
+    if not lines:
+        return mapping
 
-    total_candidates = []
-    for li in ro_lines:
+    ro_lines = sorted(lines, key=lambda l: l.aabb[1])  # top → bottom
+
+    for idx, li in enumerate(ro_lines):
         s = normalize_spaces(li.text)
-        if is_date_like(s):
+        if not s:
+            continue
+
+        # --- DATE ---
+        if is_date_like(s) or re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", s):
             mapping[id(li)] = "DATE"
             continue
 
-        amt = is_total_amount(s)
-        if amt is not None and re.search(r"(total|grand\s*total|amount\s*due|cash)", s, flags=re.I):
-            total_candidates.append((amt, li, s))
-
-    # Pick strongest total line
-    if total_candidates:
-        best_li = max(total_candidates, key=lambda x: (x[0], ro_lines.index(x[1])))[1]
-        mapping[id(best_li)] = "TOTAL"
-
-    # COMPANY / ADDRESS heuristic passes
-    cutoff_triggered = False
-    missed = []  # For debugging
-    for idx, li in enumerate(ro_lines):
-        if id(li) in mapping:
+        # --- TOTAL ---
+        if re.search(r"(total|grand\s*total|rounded\s*total|amount\s*due)", s, re.I) or re.search(r"RM\s*\d+\.\d{2}", s):
+            mapping[id(li)] = "TOTAL"
             continue
-        s = normalize_spaces(li.text)
 
-        if re.search(r"(TOTAL|AMOUNT|INVOICE|GST|CASH|ROUNDING|CHANGE)", s, flags=re.I):
-            cutoff_triggered = True
-
-        if idx < 5:
+        # --- COMPANY ---
+        c_score = fuzz.partial_ratio(s.lower(), gt.company.lower()) if gt.company else 0
+        if c_score >= 55:
             mapping[id(li)] = "COMPANY"
             continue
 
-        if cutoff_triggered and "ADDRESS" in mapping.values():
-            continue
-
-        if re.search(r"\d{4,5}|JALAN|TAMAN|SELANGOR|KUALA\s*LUMPUR|MALAYSIA", s, flags=re.I):
+        # --- ADDRESS ---
+        a_score = fuzz.token_set_ratio(s.lower(), gt.address.lower()) if gt.address else 0
+        if a_score >= 50:
             mapping[id(li)] = "ADDRESS"
             continue
 
-        f = choose_field_for_line(s, gt, idx, len(ro_lines))
-        if f:
-            mapping[id(li)] = f
+        # --- Fallback by position ---
+        pos = idx / max(len(ro_lines), 1)
+        if pos < 0.25:
+            mapping[id(li)] = "COMPANY"
+        elif pos < 0.75:
+            mapping[id(li)] = "ADDRESS"
         else:
-            missed.append(s)
+            mapping[id(li)] = "TOTAL"
 
-    # Debug summary for first few samples
-    if len(ro_lines) < 10:  # small receipts
-        print(f"\n🧾 Debug summary: {len(mapping)} mapped lines, {len(missed)} missed.")
-        if missed:
-            print("⚠️ Missed text lines:")
-            for t in missed[:5]:
-                print("  ", t)
-
+    mapped = sum(1 for v in mapping.values() if v)
+    missed = len(lines) - mapped
+    print(f"🧾 Debug summary: {mapped} mapped, {missed} missed.")
     return mapping
 
 

@@ -284,7 +284,14 @@ class ReceiptLayoutLMv3Dataset:
         stem, image, W, H, lines, ent = self._read_item(idx)
 
         
-        box_lines = [BoxLine(tuple(map(int, li["aabb"])) * 2, li["text"]) for li in lines]
+
+        # Properly expand AABB to 8-coordinate quad (rectangle)
+        box_lines = []
+        for li in lines:
+            xmin, ymin, xmax, ymax = map(int, li["aabb"])
+            quad = (xmin, ymin, xmax, ymin, xmax, ymax, xmin, ymax)
+            box_lines.append(BoxLine(quad, li["text"]))
+
 
 
 

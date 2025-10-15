@@ -1,12 +1,9 @@
 import os, json, re, argparse, torch, collections
 from tqdm import tqdm
 from PIL import Image
-from transformers import (
-    LayoutLMv3Processor,
-    LayoutLMv3ForTokenClassification,
-    AutoModelForTokenClassification,
-)
+from transformers import LayoutLMv3Processor, LayoutLMv3ForTokenClassification
 import easyocr
+
 from ..data.dataset_infer import ReceiptInferenceDataset
 from ..utils.decode import group_bio
 from ..utils.postproc import (
@@ -16,30 +13,38 @@ from ..utils.postproc import (
     pick_total_from_lines,
     clean_company,
 )
-# from ..infer.run_pipeline import load_model_and_processor
 
 # ---------------------------------------------------------------------- #
-# Auto switch: local folder or Hugging Face Hub
+#  LOAD MODEL + PROCESSOR
 # ---------------------------------------------------------------------- #
 def load_model_and_processor(model_dir_or_hub: str, device="cuda"):
-    """Load LayoutLMv3 model + processor from local folder or Hugging Face Hub."""
+    """
+    Load LayoutLMv3 model + processor from local folder or Hugging Face Hub.
+    Keeps apply_ocr=False (so model matches training),
+    but attaches an EasyOCR reader for fallback OCR extraction.
+    """
     if os.path.isdir(model_dir_or_hub):
         print(f"📦 Loading local model from {model_dir_or_hub}")
-        processor = LayoutLMv3Processor.from_pretrained(model_dir_or_hub, apply_ocr=False)
-        model = LayoutLMv3ForTokenClassification.from_pretrained(model_dir_or_hub).to(device)
     else:
         print(f"☁️ Loading model from Hugging Face Hub: {model_dir_or_hub}")
-        processor = LayoutLMv3Processor.from_pretrained(model_dir_or_hub, apply_ocr=False)
-        model = LayoutLMv3ForTokenClassification.from_pretrained(model_dir_or_hub).to(device)
+
+    processor = LayoutLMv3Processor.from_pretrained(model_dir_or_hub, apply_ocr=False)
+    model = LayoutLMv3ForTokenClassification.from_pretrained(model_dir_or_hub).to(device)
     model.eval()
+
+    # 🔹 Attach EasyOCR reader for inference OCR
+    processor.easyocr_reader = easyocr.Reader(["en"], gpu=torch.cuda.is_available())
     return processor, model
 
 
+# ---------------------------------------------------------------------- #
+#  BATCH INFERENCE
+# ---------------------------------------------------------------------- #
 @torch.no_grad()
 def main(args):
     os.makedirs(args.out_dir, exist_ok=True)
 
-    # --- Load model & processor (local or Hub) ---
+    # --- Load model & processor (local or HF) ---
     processor, model = load_model_and_processor(args.model_dir, args.device)
 
     # --- Dataset ---
@@ -119,7 +124,7 @@ def main(args):
 
 
 # ---------------------------------------------------------------------- #
-# Single-image inference helper
+#  SINGLE IMAGE INFERENCE (with dynamic OCR fallback)
 # ---------------------------------------------------------------------- #
 @torch.no_grad()
 def run_inference_single(image_path: str, model_dir: str, device="cuda"):
@@ -129,19 +134,18 @@ def run_inference_single(image_path: str, model_dir: str, device="cuda"):
     """
     print(f"🔍 Running inference for {os.path.basename(image_path)}")
 
-    # --- Load model + processor (from local or HF) ---
-    processor, model = load_model_and_processor(model_dir)
-    model = model.to(device).eval()
+    # --- Load model + processor ---
+    processor, model = load_model_and_processor(model_dir, device)
+    model.eval()
 
     image = Image.open(image_path).convert("RGB")
     W, H = image.size
-
-    # --- Try reading OCR box file first ---
     stem = os.path.splitext(os.path.basename(image_path))[0]
     box_path = os.path.abspath(os.path.join(os.path.dirname(image_path), "../box", f"{stem}.txt"))
 
     words, boxes = [], []
 
+    # --- Load precomputed OCR boxes if available ---
     if os.path.exists(box_path):
         print(f"📄 Using OCR boxes from: {box_path}")
         with open(box_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -164,9 +168,11 @@ def run_inference_single(image_path: str, model_dir: str, device="cuda"):
     else:
         # --- Fallback: run EasyOCR if no box file is found ---
         print("🧠 No precomputed OCR boxes found — running EasyOCR...")
-        reader = easyocr.Reader(["en"], gpu=torch.cuda.is_available())
-        results = reader.readtext(image_path, detail=1, paragraph=False)
+        reader = getattr(processor, "easyocr_reader", None)
+        if reader is None:
+            reader = easyocr.Reader(["en"], gpu=torch.cuda.is_available())
 
+        results = reader.readtext(image_path, detail=1, paragraph=False)
         if not results:
             raise RuntimeError("❌ OCR failed: no text detected in image.")
 
@@ -183,6 +189,12 @@ def run_inference_single(image_path: str, model_dir: str, device="cuda"):
                 int(ymax / H * 1000),
             ])
             words.append(text.strip())
+
+        # --- Optional: cache OCR results ---
+        os.makedirs("./ocr_cache", exist_ok=True)
+        cache_path = f"./ocr_cache/{stem}.json"
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump({"words": words, "boxes": boxes}, f, ensure_ascii=False, indent=2)
 
     if not words:
         raise RuntimeError("❌ No text found for LayoutLMv3 input.")
@@ -207,7 +219,7 @@ def run_inference_single(image_path: str, model_dir: str, device="cuda"):
         else:
             current_field = None
 
-    # --- Normalize and clean output ---
+    # --- Normalize & clean ---
     for k, v in fields.items():
         fields[k] = norm_spaces(v)
     fields["company"] = clean_company(fields["company"])
@@ -219,7 +231,9 @@ def run_inference_single(image_path: str, model_dir: str, device="cuda"):
     return fields, ocr_text
 
 
-
+# ---------------------------------------------------------------------- #
+#  ENTRY POINT
+# ---------------------------------------------------------------------- #
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_root", required=True)

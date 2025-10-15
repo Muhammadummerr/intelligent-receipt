@@ -101,7 +101,7 @@ def main():
         ent_dir=data_cfg["train_entities_dir"],
         processor=processor,
         max_seq_len=model_cfg["max_seq_len"],
-        use_easyocr=True,
+        use_easyocr=False,
         cache_dir="./ocr_cache",
     )
     val_ds = ReceiptLayoutLMv3Dataset(
@@ -110,7 +110,7 @@ def main():
         ent_dir=data_cfg["train_entities_dir"],
         processor=processor,
         max_seq_len=model_cfg["max_seq_len"],
-        use_easyocr=True,
+        use_easyocr=False,
         cache_dir="./ocr_cache",
     )
 
