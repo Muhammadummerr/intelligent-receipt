@@ -281,7 +281,18 @@ class ReceiptLayoutLMv3Dataset:
     def __getitem__(self, idx: int):
         stem, image, W, H, lines, ent = self._read_item(idx)
 
+        # 🧠 Compute field mapping ONCE per receipt
+        mapping = assign_lines_to_fields(lines, ent)
+
+        # 🪶 Debug: check OCR and mapping
+        print(f"\n📦 {stem}: loaded {len(lines)} OCR lines.")
+        if len(lines) > 0:
+            print("  Example OCR line:", lines[0]["text"])
+        if len(mapping) == 0:
+            print("⚠️ No field mapping found — all labels may become 'O'.")
+
         words, boxes, labels = [], [], []
+
         for li in lines:
             xmin, ymin, xmax, ymax = li["aabb"]
             clean_text = " ".join(li["text"].split())
@@ -289,7 +300,8 @@ class ReceiptLayoutLMv3Dataset:
             if not tokens:
                 continue
 
-            field = assign_lines_to_fields([], ent).get(id(li), None)
+            # ✅ use the mapping from above
+            field = mapping.get(id(li), None)
             if field in FIELD_TO_BI:
                 b_label, i_label = FIELD_TO_BI[field]
             else:
@@ -323,4 +335,5 @@ class ReceiptLayoutLMv3Dataset:
         item = {k: v.squeeze(0) for k, v in encoded.items()}
         item["id"] = stem
         return item
+
 
