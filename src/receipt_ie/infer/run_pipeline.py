@@ -310,17 +310,40 @@ def run_pipeline_single(image_path: str, model_dir: str, llm_provider="openai", 
     """Run the full pipeline on a single receipt."""
     print(f"🔍 Processing: {os.path.basename(image_path)}")
 
-    # Step 1 — LayoutLMv3 inference (with auto processor fallback)
+    # Step 1 — LayoutLMv3 inference
     try:
+        # Try local or Hugging Face model automatically
         extracted, ocr_text = run_inference_single(image_path, model_dir)
     except Exception as e:
-        print(f"⚠️ Processor loading failed: {e}")
-        print("🔁 Loading base LayoutLMv3 processor as fallback.")
-        from transformers import LayoutLMv3Processor
-        base_proc = LayoutLMv3Processor.from_pretrained("microsoft/layoutlmv3-base", apply_ocr=False)
-        base_proc.save_pretrained(model_dir)
-        extracted, ocr_text = run_inference_single(image_path, model_dir)
-    print("✅ Step 1 complete: Extracted raw fields.")
+        print(f"⚠️ Initial inference failed with model {model_dir}: {e}")
+
+        # --- Smart fallback logic ---
+        if not os.path.isdir(model_dir):
+            print("☁️ Attempting to load model directly from Hugging Face Hub...")
+            try:
+                from transformers import LayoutLMv3Processor, LayoutLMv3ForTokenClassification
+                processor = LayoutLMv3Processor.from_pretrained(model_dir, apply_ocr=False)
+                model = LayoutLMv3ForTokenClassification.from_pretrained(model_dir)
+                processor.save_pretrained("./fallback_model")
+                model.save_pretrained("./fallback_model")
+                print("✅ Hugging Face model loaded successfully.")
+                extracted, ocr_text = run_inference_single(image_path, "./fallback_model")
+            except Exception as hub_err:
+                print(f"❌ Failed to load from Hugging Face: {hub_err}")
+                print("🔁 Falling back to base LayoutLMv3 model.")
+                from transformers import LayoutLMv3Processor
+                base_proc = LayoutLMv3Processor.from_pretrained("microsoft/layoutlmv3-base", apply_ocr=False)
+                base_proc.save_pretrained("./fallback_model")
+                extracted, ocr_text = run_inference_single(image_path, "./fallback_model")
+        else:
+            # case 2: local model path is corrupt or missing configs
+            print("🔁 Local model folder is invalid, using base LayoutLMv3 as fallback.")
+            from transformers import LayoutLMv3Processor
+            base_proc = LayoutLMv3Processor.from_pretrained("microsoft/layoutlmv3-base", apply_ocr=False)
+            base_proc.save_pretrained("./fallback_model")
+            extracted, ocr_text = run_inference_single(image_path, "./fallback_model")
+
+    print("✅ Step 1 complete: Extracted raw fields from LayoutLMv3.")
 
     # Step 2 — Reasoning with LLM
     llm = LLMClient(provider=llm_provider, model=llm_model, temperature=0.0)
@@ -344,7 +367,6 @@ def run_pipeline_single(image_path: str, model_dir: str, llm_provider="openai", 
     final_output = normalize_refined_output(refined)
     print("✅ Step 2 complete: Reasoning and validation finished.")
     return final_output
-
 
 # ------------------------------ CLI ------------------------------ #
 def main():
