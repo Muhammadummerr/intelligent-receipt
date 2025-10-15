@@ -33,8 +33,17 @@ from src.receipt_ie.data.align import LABELS, LABEL2ID
 # Utility: load config
 # -----------------------------------------------------
 def load_config(cfg_path="configs/default.yaml"):
+    import yaml
     with open(cfg_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+
+    if "data" in cfg and "root" in cfg["data"]:
+        root = cfg["data"]["root"]
+        for k, v in cfg["data"].items():
+            if isinstance(v, str) and "${data.root}" in v:
+                cfg["data"][k] = v.replace("${data.root}", root)
+
+    return cfg
 
 
 # -----------------------------------------------------
