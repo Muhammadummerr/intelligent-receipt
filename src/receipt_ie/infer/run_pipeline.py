@@ -342,7 +342,7 @@ def run_pipeline_single(image_path: str, model_dir: str, llm_provider="openai", 
             base_proc = LayoutLMv3Processor.from_pretrained("microsoft/layoutlmv3-base", apply_ocr=False)
             base_proc.save_pretrained("./fallback_model")
             extracted, ocr_text = run_inference_single(image_path, "./fallback_model")
-
+    print(f"Extracted:{extracted}")
     print("✅ Step 1 complete: Extracted raw fields from LayoutLMv3.")
 
     # Step 2 — Reasoning with LLM
