@@ -57,14 +57,20 @@ def main():
         ent_dir=data_cfg["train_entities_dir"],
         processor=processor,
         max_seq_len=model_cfg["max_seq_len"],
+        use_easyocr=True,           # 🧠 dynamic OCR
+        cache_dir="./ocr_cache"     # 💾 cache results
     )
+
     val_ds = ReceiptLayoutLMv3Dataset(
         img_dir=data_cfg["train_img_dir"],
         box_dir=data_cfg["train_box_dir"],
         ent_dir=data_cfg["train_entities_dir"],
         processor=processor,
         max_seq_len=model_cfg["max_seq_len"],
+        use_easyocr=True,
+        cache_dir="./ocr_cache"
     )
+
 
     # --- Initialize model ---
     model = LayoutLMv3ForTokenClassification.from_pretrained(
