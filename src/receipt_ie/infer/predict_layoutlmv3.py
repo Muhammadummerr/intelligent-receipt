@@ -6,6 +6,7 @@ from transformers import (
     LayoutLMv3ForTokenClassification,
     AutoModelForTokenClassification,
 )
+import easyocr
 from ..data.dataset_infer import ReceiptInferenceDataset
 from ..utils.decode import group_bio
 from ..utils.postproc import (
@@ -15,6 +16,7 @@ from ..utils.postproc import (
     pick_total_from_lines,
     clean_company,
 )
+from ..infer.run_pipeline import load_model_and_processor
 
 # ---------------------------------------------------------------------- #
 # Auto switch: local folder or Hugging Face Hub
@@ -121,31 +123,71 @@ def main(args):
 # ---------------------------------------------------------------------- #
 @torch.no_grad()
 def run_inference_single(image_path: str, model_dir: str, device="cuda"):
-    processor, model = load_model_and_processor(model_dir, device)
+    """
+    Run LayoutLMv3 inference on a single receipt image.
+    If OCR box file is missing, extract text and boxes automatically using EasyOCR.
+    """
+    print(f"🔍 Running inference for {os.path.basename(image_path)}")
+
+    # --- Load model + processor (from local or HF) ---
+    processor, model = load_model_and_processor(model_dir)
+    model = model.to(device).eval()
+
     image = Image.open(image_path).convert("RGB")
     W, H = image.size
 
+    # --- Try reading OCR box file first ---
     stem = os.path.splitext(os.path.basename(image_path))[0]
     box_path = os.path.abspath(os.path.join(os.path.dirname(image_path), "../box", f"{stem}.txt"))
-    with open(box_path, "r", encoding="utf-8", errors="ignore") as f:
-        ocr_lines = f.readlines()
 
     words, boxes = [], []
-    for line in ocr_lines:
-        parts = line.strip().split(",")
-        if len(parts) < 9:
-            continue
-        coords = list(map(int, parts[:8]))
-        text = ",".join(parts[8:]).strip()
-        words.append(text)
-        xmin, ymin, xmax, ymax = coords[0], coords[1], coords[4], coords[5]
-        boxes.append([
-            int(xmin / W * 1000),
-            int(ymin / H * 1000),
-            int(xmax / W * 1000),
-            int(ymax / H * 1000),
-        ])
 
+    if os.path.exists(box_path):
+        print(f"📄 Using OCR boxes from: {box_path}")
+        with open(box_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) < 9:
+                    continue
+                coords = list(map(int, parts[:8]))
+                text = ",".join(parts[8:]).strip()
+                if not text:
+                    continue
+                xmin, ymin, xmax, ymax = coords[0], coords[1], coords[4], coords[5]
+                boxes.append([
+                    int(xmin / W * 1000),
+                    int(ymin / H * 1000),
+                    int(xmax / W * 1000),
+                    int(ymax / H * 1000),
+                ])
+                words.append(text)
+    else:
+        # --- Fallback: run EasyOCR if no box file is found ---
+        print("🧠 No precomputed OCR boxes found — running EasyOCR...")
+        reader = easyocr.Reader(["en"], gpu=torch.cuda.is_available())
+        results = reader.readtext(image_path, detail=1, paragraph=False)
+
+        if not results:
+            raise RuntimeError("❌ OCR failed: no text detected in image.")
+
+        for (bbox, text, conf) in results:
+            if not text.strip():
+                continue
+            ((x1, y1), (x2, y2), (x3, y3), (x4, y4)) = bbox
+            xmin, ymin = min(x1, x2, x3, x4), min(y1, y2, y3, y4)
+            xmax, ymax = max(x1, x2, x3, x4), max(y1, y2, y3, y4)
+            boxes.append([
+                int(xmin / W * 1000),
+                int(ymin / H * 1000),
+                int(xmax / W * 1000),
+                int(ymax / H * 1000),
+            ])
+            words.append(text.strip())
+
+    if not words:
+        raise RuntimeError("❌ No text found for LayoutLMv3 input.")
+
+    # --- Run LayoutLMv3 model ---
     inputs = processor(image, words, boxes=boxes, return_tensors="pt", truncation=True).to(device)
     outputs = model(**inputs)
     predictions = outputs.logits.argmax(-1).squeeze().tolist()
@@ -154,6 +196,7 @@ def run_inference_single(image_path: str, model_dir: str, device="cuda"):
     tokens = processor.tokenizer.convert_ids_to_tokens(inputs["input_ids"].squeeze())
     fields = {"company": "", "date": "", "address": "", "total": ""}
     current_field = None
+
     for token, pred in zip(tokens, predictions):
         label = label_map[pred]
         if label.startswith("B-"):
@@ -164,7 +207,7 @@ def run_inference_single(image_path: str, model_dir: str, device="cuda"):
         else:
             current_field = None
 
-    # Normalize
+    # --- Normalize and clean output ---
     for k, v in fields.items():
         fields[k] = norm_spaces(v)
     fields["company"] = clean_company(fields["company"])
@@ -172,7 +215,9 @@ def run_inference_single(image_path: str, model_dir: str, device="cuda"):
     fields["total"] = soft_total_norm(fields["total"]) or ""
 
     ocr_text = "\n".join(words)
+    print("✅ Inference complete.")
     return fields, ocr_text
+
 
 
 if __name__ == "__main__":

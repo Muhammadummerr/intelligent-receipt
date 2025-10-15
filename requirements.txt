@@ -7,3 +7,4 @@ rapidfuzz>=3.0.0
 pyyaml
 python-dateutil
 groq
+easyocr
