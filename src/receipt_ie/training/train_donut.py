@@ -26,6 +26,11 @@ from tqdm import tqdm
 import types
 
 # -------------------- Environment --------------------
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["NCCL_P2P_DISABLE"] = "1"
+os.environ["NCCL_IB_DISABLE"] = "1"
+os.environ["NCCL_SHM_DISABLE"] = "1"
+os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["WANDB_DISABLED"] = "true"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HF_DATASETS_DISABLE_CACHE"] = "1"
