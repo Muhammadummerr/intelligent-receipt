@@ -1,12 +1,11 @@
 """
-train_donut_lora_fixed.py
+train_donut_lora_final.py
 --------------------------
-Stable LoRA fine-tuning for Donut on Kaggle GPUs (no bitsandbytes).
-- Works on T4/P100 (<=8GB VRAM)
-- Image resize 224x224
-- In-memory dataset
-- LoRA applied to decoder.model (NOT the ForCausalLM wrapper) ← fixes kwarg bug
-- Freezes encoder for stability
+LoRA fine-tuning for Donut on Kaggle GPUs without bitsandbytes.
+
+Key idea: bypass VisionEncoderDecoderModel.forward during training
+and call the decoder (MBartForCausalLM) directly with the correct kwargs.
+This avoids the 'decoder_input_ids' kwarg mismatch.
 """
 
 import os
@@ -55,7 +54,7 @@ def load_entity_file(path):
 
 
 def build_donut_json(data_root, split="train", output_json="train.json"):
-    """Builds Donut JSON lines from image + entity directories."""
+    """Builds Donut JSONL from image + entity directories."""
     img_dir = os.path.join(data_root, split, "img")
     ent_dir = os.path.join(data_root, split, "entities")
 
@@ -93,7 +92,6 @@ def build_donut_json(data_root, split="train", output_json="train.json"):
 
 
 def load_json_dataset(train_json, val_json):
-    """Loads prebuilt JSON files into HuggingFace DatasetDict."""
     with open(train_json, "r", encoding="utf-8") as f:
         train_data = [json.loads(line) for line in f]
     with open(val_json, "r", encoding="utf-8") as f:
@@ -101,13 +99,13 @@ def load_json_dataset(train_json, val_json):
     return DatasetDict({"train": Dataset.from_list(train_data), "validation": Dataset.from_list(val_data)})
 
 
-def make_preprocess_fn(processor):
+def make_preprocess_fn(processor, size=224):
     eos_id = processor.tokenizer.eos_token_id
 
     def _fn(examples):
         pixel_values, labels = [], []
         for image_path, gt in zip(examples["image"], examples["ground_truth"]):
-            image = Image.open(image_path).convert("RGB").resize((224, 224))
+            image = Image.open(image_path).convert("RGB").resize((size, size))
             pv = processor(image, return_tensors="pt").pixel_values.squeeze(0)
             ids = processor.tokenizer(gt, add_special_tokens=False, return_tensors="pt").input_ids.squeeze(0)
             if eos_id is not None:
@@ -136,9 +134,43 @@ def donut_collate_fn(batch):
 
 # -------------------- Custom Trainer ------------------
 class DonutTrainer(Seq2SeqTrainer):
-    """Ensure only pixel_values + labels are passed to model."""
+    """
+    Train by explicitly running:
+      1) vision encoder
+      2) decoder with input_ids (NOT decoder_input_ids)
+    This avoids the VisionEncoderDecoderModel kwarg mismatch.
+    """
+
+    def _shift_right(self, labels, pad_token_id, start_token_id):
+        # replace -100 with pad before shifting
+        dec = labels.clone()
+        dec[dec == -100] = pad_token_id
+        # shift right
+        shifted = dec.new_full(dec.shape, pad_token_id)
+        shifted[:, 1:] = dec[:, :-1]
+        shifted[:, 0] = start_token_id
+        return shifted
+
     def compute_loss(self, model, inputs, return_outputs=False):
-        outputs = model(pixel_values=inputs["pixel_values"], labels=inputs["labels"])
+        pixel_values = inputs["pixel_values"]
+        labels = inputs["labels"]
+
+        # 1) encode image
+        encoder_outputs = model.get_encoder()(pixel_values=pixel_values, return_dict=True)
+
+        # 2) prepare decoder inputs (teacher forcing)
+        pad_id = model.config.pad_token_id
+        start_id = model.config.decoder_start_token_id
+        decoder_input_ids = self._shift_right(labels, pad_id, start_id)
+
+        # 3) forward through the (LoRA-wrapped) decoder with the correct arg names
+        dec = model.decoder  # MBartForCausalLM
+        outputs = dec(
+            input_ids=decoder_input_ids,
+            encoder_hidden_states=encoder_outputs.last_hidden_state,
+            labels=labels,                  # HF will compute CE loss with shift internally
+            use_cache=False,
+        )
         loss = outputs.loss
         return (loss, outputs) if return_outputs else loss
 
@@ -146,11 +178,11 @@ class DonutTrainer(Seq2SeqTrainer):
 # -------------------- Main ---------------------------
 def main():
     data_root = "/kaggle/input/receipt-dataset"
-    model_id = "Bennet1996/donut-small"  # Lightweight Donut variant
+    model_id = "Bennet1996/donut-small"  # Lightweight Donut
     out_dir = "/kaggle/temp/outputs_donut"
     os.makedirs(out_dir, exist_ok=True)
 
-    # 1️⃣ Build dataset
+    # 1️⃣ Build dataset JSONL
     train_json = build_donut_json(data_root, "train", os.path.join(out_dir, "train.json"))
     val_json = build_donut_json(data_root, "test", os.path.join(out_dir, "val.json"))
     dataset = load_json_dataset(train_json, val_json)
@@ -159,16 +191,16 @@ def main():
     processor = DonutProcessor.from_pretrained(model_id)
     model = VisionEncoderDecoderModel.from_pretrained(model_id)
 
-    # --- Route embedding getters to decoder for PEFT safety ---
+    # --- ensure embedding routing for safety with PEFT ---
     def _get_input_embeddings(self):
         return self.decoder.get_input_embeddings()
     def _set_input_embeddings(self, new_emb):
         return self.decoder.set_input_embeddings(new_emb)
     model.get_input_embeddings = types.MethodType(_get_input_embeddings, model)
     model.set_input_embeddings = types.MethodType(_set_input_embeddings, model)
-    # ----------------------------------------------------------
+    # ------------------------------------------------------
 
-    # 3️⃣ Tokenizer + config setup
+    # 3️⃣ Tokenizer + config
     processor.tokenizer.pad_token = processor.tokenizer.eos_token
     model.config.pad_token_id = processor.tokenizer.pad_token_id
     model.config.decoder_start_token_id = processor.tokenizer.bos_token_id or processor.tokenizer.pad_token_id
@@ -178,7 +210,7 @@ def main():
     model.decoder.config.use_cache = False
     model.gradient_checkpointing_enable()
 
-    # 4️⃣ LoRA — apply to the *internal* transformer blocks, not the ForCausalLM wrapper
+    # 4️⃣ LoRA on the full decoder (MBartForCausalLM) — now safe because we call it ourselves
     lora_cfg = LoraConfig(
         task_type=TaskType.SEQ_2_SEQ_LM,
         r=16,
@@ -186,31 +218,24 @@ def main():
         lora_dropout=0.05,
         target_modules=["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"],
     )
-
-    # IMPORTANT: wrap the underlying decoder.transformer (e.g., MBartModel) to keep forward() signature intact
-    # MBartForCausalLM has attribute `.model` which holds the transformer stack.
-    model.decoder.model = get_peft_model(model.decoder.model, lora_cfg)
-
-    # Show trainable params (includes LoRA params only)
+    model.decoder = get_peft_model(model.decoder, lora_cfg)
     try:
-        model.decoder.model.print_trainable_parameters()
+        model.decoder.print_trainable_parameters()
     except Exception:
-        # fallback if PEFT version lacks the helper
-        trainable = sum(p.numel() for p in model.decoder.model.parameters() if p.requires_grad)
+        trainable = sum(p.numel() for p in model.decoder.parameters() if p.requires_grad)
         total = sum(p.numel() for p in model.parameters())
-        print(f"trainable params (decoder.model): {trainable} / {total} "
-              f"({100.0 * trainable / total:.4f}%)")
+        print(f"trainable params (decoder): {trainable} / {total} ({100.0 * trainable / total:.4f}%)")
 
-    # ✅ Freeze encoder (vision side)
+    # ✅ Freeze encoder (VRAM + stability)
     for p in model.encoder.parameters():
         p.requires_grad = False
 
     # 5️⃣ Preprocess dataset
-    preprocess = make_preprocess_fn(processor)
+    preprocess = make_preprocess_fn(processor, size=224)
     dataset = dataset.map(preprocess, batched=True)
     dataset.set_format(type="torch", columns=["pixel_values", "labels"])
 
-    # 6️⃣ Training arguments
+    # 6️⃣ Training args (disable generate to avoid touching VisionEncoderDecoder.forward)
     args = Seq2SeqTrainingArguments(
         output_dir=out_dir,
         num_train_epochs=10,
@@ -218,9 +243,7 @@ def main():
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=4,
-        predict_with_generate=True,
-        generation_max_length=128,
-        generation_num_beams=3,
+        predict_with_generate=False,   # ← important
         fp16=torch.cuda.is_available(),
         save_strategy="epoch",
         evaluation_strategy="epoch",
@@ -242,7 +265,7 @@ def main():
         data_collator=donut_collate_fn,
     )
 
-    print("🚀 Fine-tuning Donut with LoRA on decoder.model (Kaggle-safe)…")
+    print("🚀 Fine-tuning Donut (encoder frozen) with LoRA on decoder…")
     trainer.train()
     print("✅ Training complete!")
 
