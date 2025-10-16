@@ -5,7 +5,7 @@ LoRA fine-tuning for Donut on Kaggle GPUs (no bitsandbytes).
 - Works on T4/P100 (<=8GB VRAM)
 - Image resize 224x224
 - In-memory dataset (no Arrow cache)
-- Custom Trainer that never passes `input_ids` to the vision encoder
+- Custom Trainer that never passes `input_ids` or `attention_mask` to encoder
 """
 
 import os
@@ -34,6 +34,7 @@ torch.backends.cudnn.benchmark = True
 
 # -------------------- Utilities ----------------------
 def load_entity_file(path):
+    """Reads a JSON or key:value TXT file into a dict."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = f.read().strip()
@@ -52,6 +53,7 @@ def load_entity_file(path):
 
 
 def build_donut_json(data_root, split="train", output_json="train.json"):
+    """Builds Donut JSON lines from image + entity directories."""
     img_dir = os.path.join(data_root, split, "img")
     ent_dir = os.path.join(data_root, split, "entities")
 
@@ -89,6 +91,7 @@ def build_donut_json(data_root, split="train", output_json="train.json"):
 
 
 def load_json_dataset(train_json, val_json):
+    """Loads prebuilt JSON files into HuggingFace DatasetDict."""
     with open(train_json, "r", encoding="utf-8") as f:
         train_data = [json.loads(line) for line in f]
     with open(val_json, "r", encoding="utf-8") as f:
@@ -102,9 +105,7 @@ def make_preprocess_fn(processor):
     def _fn(examples):
         pixel_values, labels = [], []
         for image_path, gt in zip(examples["image"], examples["ground_truth"]):
-            image = Image.open(image_path).convert("RGB")
-            image = image.resize((224, 224))  # small, Kaggle-safe
-
+            image = Image.open(image_path).convert("RGB").resize((224, 224))
             pv = processor(image, return_tensors="pt").pixel_values.squeeze(0)
             ids = processor.tokenizer(gt, add_special_tokens=False, return_tensors="pt").input_ids.squeeze(0)
             if eos_id is not None:
@@ -122,96 +123,51 @@ def make_preprocess_fn(processor):
 
 def donut_collate_fn(batch):
     pixel_values = torch.stack([torch.as_tensor(b["pixel_values"]) for b in batch])
-
     lengths = [x["labels"].size(0) for x in batch]
     max_len = max(lengths)
     labels = torch.full((len(batch), max_len), -100, dtype=torch.long)
     for i, x in enumerate(batch):
         seq = x["labels"]
         labels[i, : seq.size(0)] = seq
-
     return {"pixel_values": pixel_values, "labels": labels}
 
 
 # -------------------- Custom Trainer ------------------
 class DonutTrainer(Seq2SeqTrainer):
-    """Force the model to receive only pixel_values + labels.
-    Prevents accidental passing of `input_ids` to the vision encoder.
-    """
-
+    """Ensure only pixel_values + labels are passed to model."""
     def compute_loss(self, model, inputs, return_outputs=False):
         outputs = model(pixel_values=inputs["pixel_values"], labels=inputs["labels"])
         loss = outputs.loss
         return (loss, outputs) if return_outputs else loss
 
-    def prediction_step(
-        self, model, inputs, prediction_loss_only: bool, ignore_keys=None
-    ):
-        with torch.no_grad():
-            outputs = model(pixel_values=inputs["pixel_values"], labels=inputs["labels"])
-            loss = outputs.loss.detach()
-
-            if prediction_loss_only or not self.args.predict_with_generate:
-                return (loss, None, None)
-
-            gen = model.generate(
-                pixel_values=inputs["pixel_values"],
-                max_length=self.args.generation_max_length,
-            )
-            return (loss, gen, inputs["labels"])
-
 
 # -------------------- Main ---------------------------
 def main():
     data_root = "/kaggle/input/receipt-dataset"
-    # Use the small model by default (fits T4/P100 comfortably)
-    model_id = "Bennet1996/donut-small"
+    model_id = "Bennet1996/donut-small"  # Lightweight Donut variant
     out_dir = "/kaggle/temp/outputs_donut"
     os.makedirs(out_dir, exist_ok=True)
 
-    # Build dataset jsons
+    # 1️⃣ Build dataset
     train_json = build_donut_json(data_root, "train", os.path.join(out_dir, "train.json"))
     val_json = build_donut_json(data_root, "test", os.path.join(out_dir, "val.json"))
     dataset = load_json_dataset(train_json, val_json)
 
-    # Processor & base model
+    # 2️⃣ Load processor + model
     processor = DonutProcessor.from_pretrained(model_id)
     model = VisionEncoderDecoderModel.from_pretrained(model_id)
-    # --- PATCH: prevent input_ids being sent to the vision encoder ---
-    # --- FINAL PATCH: safe forward for Donut VisionEncoderDecoderModel ---
-    import types
 
-    def patched_forward(self, pixel_values=None, labels=None, **kwargs):
-        """
-        Custom forward that ensures Donut's encoder (Swin) gets only valid arguments.
-        """
-        # Encoder forward — only pass pixel_values!
-        encoder_outputs = self.encoder(pixel_values=pixel_values, return_dict=True)
-        encoder_hidden_states = encoder_outputs.last_hidden_state
-
-        # Decoder forward (teacher forcing if labels provided)
-        decoder_inputs = {
-            "encoder_hidden_states": encoder_hidden_states,
-            "labels": labels,
-            "return_dict": True,
-        }
-        outputs = self.decoder(**decoder_inputs)
-        return outputs
-
-    model.forward = types.MethodType(patched_forward, model)
-    print("✅ Patched model.forward(): safe for Donut (no attention_mask, no input_ids).")
-
-
-
-
-    # Tokenizer/model config
+    # Model configuration
     processor.tokenizer.pad_token = processor.tokenizer.eos_token
     model.config.pad_token_id = processor.tokenizer.pad_token_id
     model.config.decoder_start_token_id = processor.tokenizer.bos_token_id or processor.tokenizer.pad_token_id
     model.config.eos_token_id = processor.tokenizer.eos_token_id
     model.config.max_length = 128
+    model.config.use_cache = False
+    model.decoder.config.use_cache = False
+    model.gradient_checkpointing_enable()
 
-    # Attach LoRA adapters (decoder-only modules)
+    # 3️⃣ Attach LoRA adapters (decoder-only)
     lora_cfg = LoraConfig(
         task_type=TaskType.SEQ_2_SEQ_LM,
         r=16,
@@ -222,22 +178,16 @@ def main():
     model = get_peft_model(model, lora_cfg)
     model.print_trainable_parameters()
 
-    # Preprocess
+    # 4️⃣ Preprocess
     preprocess = make_preprocess_fn(processor)
     dataset = dataset.map(preprocess, batched=True)
     dataset.set_format(type="torch", columns=["pixel_values", "labels"])
 
-    # Memory helpers
-    model.gradient_checkpointing_enable()
-    # model.enable_input_require_grads()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    # Training args
+    # 5️⃣ Training
     args = Seq2SeqTrainingArguments(
         output_dir=out_dir,
         num_train_epochs=10,
-        learning_rate=2e-4,                 # LoRA: you can use higher LR
+        learning_rate=2e-4,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=4,
@@ -249,8 +199,8 @@ def main():
         logging_dir=os.path.join(out_dir, "logs"),
         logging_steps=50,
         save_total_limit=2,
-        remove_unused_columns=False,        # <- important for vision enc/dec
-        report_to=[],                       # no W&B
+        remove_unused_columns=False,
+        report_to=[],
     )
 
     trainer = DonutTrainer(
@@ -258,7 +208,6 @@ def main():
         args=args,
         train_dataset=dataset["train"],
         eval_dataset=dataset["validation"],
-        # Do NOT pass tokenizer here; we’re not using text input_ids
         data_collator=donut_collate_fn,
     )
 
