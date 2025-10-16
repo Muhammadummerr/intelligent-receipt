@@ -213,7 +213,7 @@ def main():
     # 6) Training args — bf16, tiny batch, small grad_accum
     args = Seq2SeqTrainingArguments(
         output_dir=out_dir,
-        num_train_epochs=10,
+        num_train_epochs=20,
         learning_rate=2e-4,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
