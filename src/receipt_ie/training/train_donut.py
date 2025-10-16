@@ -233,7 +233,7 @@ def main():
         max_grad_norm=0.5,
         dataloader_pin_memory=True,
         dataloader_num_workers=0,      # light workers to avoid RAM spikes
-        max_split_size_mb=32,
+        # max_split_size_mb=32,
     )
 
     # 7) Trainer (simple: call model.forward)
