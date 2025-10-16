@@ -178,7 +178,10 @@ def main():
         preprocess_fn,
         batched=True,
         remove_columns=dataset["train"].column_names,
+        keep_in_memory=True,     # ✅ keeps data in RAM, not on disk
+        load_from_cache_file=False
     )
+
 
     # ✅ Convert all columns to torch tensors (fixes collate issue)
     dataset.set_format(type="torch", columns=["pixel_values", "labels"])
