@@ -4,10 +4,10 @@ train_donut_lora_final_dp_safe.py
 Stable LoRA fine-tuning for Donut on Kaggle GPUs (no bitsandbytes).
 
 Key points:
-- LoRA on decoder (language side), encoder frozen
+- LoRA on decoder (MBartForCausalLM) with TaskType.CAUSAL_LM  ← IMPORTANT
+- Freeze vision encoder
 - Bypass VisionEncoderDecoder.forward in training (call decoder directly)
 - DataParallel-safe: unwrap model inside compute_loss
-- Kaggle-friendly memory footprint
 """
 
 import os
@@ -137,9 +137,9 @@ def donut_collate_fn(batch):
 # -------------------- Custom Trainer ------------------
 class DonutTrainer(Seq2SeqTrainer):
     """
-    DataParallel-safe custom training step:
+    DP-safe custom training step:
       - unwrap model before accessing get_encoder()/decoder
-      - run encoder explicitly, then call decoder with input_ids (not decoder_input_ids)
+      - run encoder explicitly, then call decoder with input_ids (NOT decoder_input_ids)
     """
 
     @staticmethod
@@ -163,15 +163,15 @@ class DonutTrainer(Seq2SeqTrainer):
         # 1) encode image
         encoder_outputs = base.get_encoder()(pixel_values=pixel_values, return_dict=True)
 
-        # 2) prepare decoder inputs (teacher forcing)
+        # 2) teacher-forcing inputs for decoder
         pad_id = base.config.pad_token_id
         start_id = base.config.decoder_start_token_id
         decoder_input_ids = self._shift_right(labels, pad_id, start_id)
 
         # 3) forward through decoder with correct arg names
-        dec = base.decoder  # MBartForCausalLM (may be PEFT-wrapped)
+        dec = base.decoder  # MBartForCausalLM (PEFT-wrapped)
         outputs = dec(
-            input_ids=decoder_input_ids,
+            input_ids=decoder_input_ids,                          # <- keep as input_ids
             encoder_hidden_states=encoder_outputs.last_hidden_state,
             labels=labels,
             use_cache=False,
@@ -196,14 +196,13 @@ def main():
     processor = DonutProcessor.from_pretrained(model_id)
     model = VisionEncoderDecoderModel.from_pretrained(model_id)
 
-    # --- embedding routing for PEFT safety (no-op for our training path, but harmless) ---
+    # (embedding routing helpers – harmless here)
     def _get_input_embeddings(self):
         return self.decoder.get_input_embeddings()
     def _set_input_embeddings(self, new_emb):
         return self.decoder.set_input_embeddings(new_emb)
     model.get_input_embeddings = types.MethodType(_get_input_embeddings, model)
     model.set_input_embeddings = types.MethodType(_set_input_embeddings, model)
-    # --------------------------------------------------------------------------------------
 
     # 3) Tokenizer + config
     processor.tokenizer.pad_token = processor.tokenizer.eos_token
@@ -215,9 +214,9 @@ def main():
     model.decoder.config.use_cache = False
     model.gradient_checkpointing_enable()
 
-    # 4) LoRA on decoder (full MBartForCausalLM is fine since we call it directly)
+    # 4) LoRA on decoder with the CORRECT task type
     lora_cfg = LoraConfig(
-        task_type=TaskType.SEQ_2_SEQ_LM,
+        task_type=TaskType.CAUSAL_LM,     # <- FIX: use CAUSAL_LM for MBartForCausalLM
         r=16,
         lora_alpha=32,
         lora_dropout=0.05,
@@ -240,7 +239,7 @@ def main():
     dataset = dataset.map(preprocess, batched=True)
     dataset.set_format(type="torch", columns=["pixel_values", "labels"])
 
-    # 6) Training args — keep generate off to avoid the buggy VE forward path
+    # 6) Training args — keep generate off to avoid VE forward path during eval
     args = Seq2SeqTrainingArguments(
         output_dir=out_dir,
         num_train_epochs=10,
@@ -270,7 +269,7 @@ def main():
         data_collator=donut_collate_fn,
     )
 
-    print("🚀 Fine-tuning Donut (encoder frozen) with LoRA on decoder…")
+    print("🚀 Fine-tuning Donut (encoder frozen) with LoRA on decoder (CAUSAL_LM)…")
     trainer.train()
     print("✅ Training complete!")
 
