@@ -1,11 +1,13 @@
 """
-train_donut_lora_final.py
---------------------------
-LoRA fine-tuning for Donut on Kaggle GPUs without bitsandbytes.
+train_donut_lora_final_dp_safe.py
+---------------------------------
+Stable LoRA fine-tuning for Donut on Kaggle GPUs (no bitsandbytes).
 
-Key idea: bypass VisionEncoderDecoderModel.forward during training
-and call the decoder (MBartForCausalLM) directly with the correct kwargs.
-This avoids the 'decoder_input_ids' kwarg mismatch.
+Key points:
+- LoRA on decoder (language side), encoder frozen
+- Bypass VisionEncoderDecoder.forward in training (call decoder directly)
+- DataParallel-safe: unwrap model inside compute_loss
+- Kaggle-friendly memory footprint
 """
 
 import os
@@ -135,40 +137,43 @@ def donut_collate_fn(batch):
 # -------------------- Custom Trainer ------------------
 class DonutTrainer(Seq2SeqTrainer):
     """
-    Train by explicitly running:
-      1) vision encoder
-      2) decoder with input_ids (NOT decoder_input_ids)
-    This avoids the VisionEncoderDecoderModel kwarg mismatch.
+    DataParallel-safe custom training step:
+      - unwrap model before accessing get_encoder()/decoder
+      - run encoder explicitly, then call decoder with input_ids (not decoder_input_ids)
     """
 
+    @staticmethod
+    def _unwrap(m):
+        return m.module if hasattr(m, "module") else m
+
     def _shift_right(self, labels, pad_token_id, start_token_id):
-        # replace -100 with pad before shifting
         dec = labels.clone()
         dec[dec == -100] = pad_token_id
-        # shift right
         shifted = dec.new_full(dec.shape, pad_token_id)
         shifted[:, 1:] = dec[:, :-1]
         shifted[:, 0] = start_token_id
         return shifted
 
     def compute_loss(self, model, inputs, return_outputs=False):
+        base = self._unwrap(model)
+
         pixel_values = inputs["pixel_values"]
         labels = inputs["labels"]
 
         # 1) encode image
-        encoder_outputs = model.get_encoder()(pixel_values=pixel_values, return_dict=True)
+        encoder_outputs = base.get_encoder()(pixel_values=pixel_values, return_dict=True)
 
         # 2) prepare decoder inputs (teacher forcing)
-        pad_id = model.config.pad_token_id
-        start_id = model.config.decoder_start_token_id
+        pad_id = base.config.pad_token_id
+        start_id = base.config.decoder_start_token_id
         decoder_input_ids = self._shift_right(labels, pad_id, start_id)
 
-        # 3) forward through the (LoRA-wrapped) decoder with the correct arg names
-        dec = model.decoder  # MBartForCausalLM
+        # 3) forward through decoder with correct arg names
+        dec = base.decoder  # MBartForCausalLM (may be PEFT-wrapped)
         outputs = dec(
             input_ids=decoder_input_ids,
             encoder_hidden_states=encoder_outputs.last_hidden_state,
-            labels=labels,                  # HF will compute CE loss with shift internally
+            labels=labels,
             use_cache=False,
         )
         loss = outputs.loss
@@ -182,25 +187,25 @@ def main():
     out_dir = "/kaggle/temp/outputs_donut"
     os.makedirs(out_dir, exist_ok=True)
 
-    # 1️⃣ Build dataset JSONL
+    # 1) Build dataset JSONL
     train_json = build_donut_json(data_root, "train", os.path.join(out_dir, "train.json"))
     val_json = build_donut_json(data_root, "test", os.path.join(out_dir, "val.json"))
     dataset = load_json_dataset(train_json, val_json)
 
-    # 2️⃣ Load processor + model
+    # 2) Load processor + model
     processor = DonutProcessor.from_pretrained(model_id)
     model = VisionEncoderDecoderModel.from_pretrained(model_id)
 
-    # --- ensure embedding routing for safety with PEFT ---
+    # --- embedding routing for PEFT safety (no-op for our training path, but harmless) ---
     def _get_input_embeddings(self):
         return self.decoder.get_input_embeddings()
     def _set_input_embeddings(self, new_emb):
         return self.decoder.set_input_embeddings(new_emb)
     model.get_input_embeddings = types.MethodType(_get_input_embeddings, model)
     model.set_input_embeddings = types.MethodType(_set_input_embeddings, model)
-    # ------------------------------------------------------
+    # --------------------------------------------------------------------------------------
 
-    # 3️⃣ Tokenizer + config
+    # 3) Tokenizer + config
     processor.tokenizer.pad_token = processor.tokenizer.eos_token
     model.config.pad_token_id = processor.tokenizer.pad_token_id
     model.config.decoder_start_token_id = processor.tokenizer.bos_token_id or processor.tokenizer.pad_token_id
@@ -210,7 +215,7 @@ def main():
     model.decoder.config.use_cache = False
     model.gradient_checkpointing_enable()
 
-    # 4️⃣ LoRA on the full decoder (MBartForCausalLM) — now safe because we call it ourselves
+    # 4) LoRA on decoder (full MBartForCausalLM is fine since we call it directly)
     lora_cfg = LoraConfig(
         task_type=TaskType.SEQ_2_SEQ_LM,
         r=16,
@@ -226,16 +231,16 @@ def main():
         total = sum(p.numel() for p in model.parameters())
         print(f"trainable params (decoder): {trainable} / {total} ({100.0 * trainable / total:.4f}%)")
 
-    # ✅ Freeze encoder (VRAM + stability)
+    # ✅ Freeze encoder (vision side)
     for p in model.encoder.parameters():
         p.requires_grad = False
 
-    # 5️⃣ Preprocess dataset
+    # 5) Preprocess
     preprocess = make_preprocess_fn(processor, size=224)
     dataset = dataset.map(preprocess, batched=True)
     dataset.set_format(type="torch", columns=["pixel_values", "labels"])
 
-    # 6️⃣ Training args (disable generate to avoid touching VisionEncoderDecoder.forward)
+    # 6) Training args — keep generate off to avoid the buggy VE forward path
     args = Seq2SeqTrainingArguments(
         output_dir=out_dir,
         num_train_epochs=10,
@@ -243,7 +248,7 @@ def main():
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=4,
-        predict_with_generate=False,   # ← important
+        predict_with_generate=False,  # important
         fp16=torch.cuda.is_available(),
         save_strategy="epoch",
         evaluation_strategy="epoch",
