@@ -1,22 +1,21 @@
 """
 train_donut_optimized.py
 ------------------------
-Lightweight Donut fine-tuning for Kaggle GPUs.
-Optimized for limited VRAM (T4 / P100).
+Lightweight Donut fine-tuning for Kaggle GPUs (T4 / P100).
+Optimized for limited disk + VRAM.
 
-Features:
-✅ Smaller model by default (Bennet1996/donut-small)
-✅ Image resolution reduced to 384x384
-✅ Gradient checkpointing + fp16 + accumulation
-✅ CPU memory offload where possible
-✅ Disables WandB + tokenizer parallelism
+✅ Uses in-memory dataset loading (no Arrow cache)
+✅ Stores outputs in /kaggle/temp
+✅ Reduces resolution (384x384)
+✅ Enables gradient checkpointing + fp16
+✅ Disables W&B + HF caching
 """
 
 import os
 import json
 import torch
 from PIL import Image
-from datasets import load_dataset
+from datasets import Dataset, DatasetDict
 from transformers import (
     DonutProcessor,
     VisionEncoderDecoderModel,
@@ -25,9 +24,13 @@ from transformers import (
 )
 from tqdm import tqdm
 
-# --- Environment settings (safety) ---
+# --- Environment & cache control ---
 os.environ["WANDB_DISABLED"] = "true"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["HF_DATASETS_DISABLE_CACHE"] = "1"
+os.environ["HF_DATASETS_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 
@@ -55,7 +58,7 @@ def load_entity_file(path):
 
 
 # -------------------------------
-# Step 1: Build Donut JSON dataset
+# Step 1: Build JSON dataset
 # -------------------------------
 def build_donut_json(data_root, split="train", output_json="train.json"):
     img_dir = os.path.join(data_root, split, "img")
@@ -95,7 +98,21 @@ def build_donut_json(data_root, split="train", output_json="train.json"):
 
 
 # -------------------------------
-# Step 2: Preprocessing
+# Step 2: Load dataset in-memory (no Arrow)
+# -------------------------------
+def load_json_dataset(train_json, val_json):
+    with open(train_json, "r", encoding="utf-8") as f:
+        train_data = [json.loads(line) for line in f]
+    with open(val_json, "r", encoding="utf-8") as f:
+        val_data = [json.loads(line) for line in f]
+    return DatasetDict({
+        "train": Dataset.from_list(train_data),
+        "validation": Dataset.from_list(val_data)
+    })
+
+
+# -------------------------------
+# Step 3: Preprocessing
 # -------------------------------
 def make_preprocess_fn(processor):
     eos_id = processor.tokenizer.eos_token_id
@@ -106,20 +123,13 @@ def make_preprocess_fn(processor):
             image = Image.open(image_path).convert("RGB")
             image = image.resize((384, 384))
 
-            # ✅ Ensure tensor type directly
             pv = processor(image, return_tensors="pt").pixel_values.squeeze(0)
-            pixel_values.append(pv)
-
-            # ✅ Convert to tensor immediately
-            ids = processor.tokenizer(
-                gt, add_special_tokens=False, return_tensors="pt"
-            ).input_ids.squeeze(0)
-
+            ids = processor.tokenizer(gt, add_special_tokens=False, return_tensors="pt").input_ids.squeeze(0)
             if eos_id is not None:
                 ids = torch.cat([ids, torch.tensor([eos_id], dtype=torch.long)])
+            pixel_values.append(pv)
             labels.append(ids)
 
-        # ✅ Return tensors instead of lists
         return {
             "pixel_values": [torch.as_tensor(p) for p in pixel_values],
             "labels": [torch.as_tensor(l, dtype=torch.long) for l in labels],
@@ -129,65 +139,54 @@ def make_preprocess_fn(processor):
 
 
 # -------------------------------
-# Step 3: Collator (manual padding)
+# Step 4: Collator
 # -------------------------------
 def donut_collate_fn(batch):
-    # ✅ Each item["pixel_values"] is now a tensor
     pixel_values = torch.stack([torch.as_tensor(b["pixel_values"]) for b in batch])
-
     lengths = [x["labels"].size(0) for x in batch]
     max_len = max(lengths)
     labels = torch.full((len(batch), max_len), -100, dtype=torch.long)
     for i, x in enumerate(batch):
         seq = x["labels"]
         labels[i, : seq.size(0)] = seq
-
     return {"pixel_values": pixel_values, "labels": labels}
 
 
 # -------------------------------
-# Step 4: Training
+# Step 5: Training
 # -------------------------------
 def main():
     data_root = "/kaggle/input/receipt-dataset"
-    model_id = "Bennet1996/donut-small"   # ✅ lightweight Donut model
-    out_dir = "./outputs_donut"
+    model_id = "Bennet1996/donut-small"  # ✅ small, public Donut
+    out_dir = "/kaggle/temp/outputs_donut"  # ✅ use /kaggle/temp (more space)
     os.makedirs(out_dir, exist_ok=True)
 
-    # 1️⃣ Build JSON files
+    # 1️⃣ Build JSON
     train_json = build_donut_json(data_root, "train", os.path.join(out_dir, "train.json"))
     val_json = build_donut_json(data_root, "test", os.path.join(out_dir, "val.json"))
 
-    # 2️⃣ Load dataset
-    dataset = load_dataset("json", data_files={"train": train_json, "validation": val_json})
+    # 2️⃣ Load dataset in memory
+    dataset = load_json_dataset(train_json, val_json)
 
-    # 3️⃣ Processor + model
+    # 3️⃣ Processor & model
     processor = DonutProcessor.from_pretrained(model_id)
     model = VisionEncoderDecoderModel.from_pretrained(model_id)
 
-    # Donut token setup
     processor.tokenizer.pad_token = processor.tokenizer.eos_token
     model.config.pad_token_id = processor.tokenizer.pad_token_id
-    model.config.decoder_start_token_id = processor.tokenizer.bos_token_id or processor.tokenizer.pad_token_id
+    model.config.decoder_start_token_id = (
+        processor.tokenizer.bos_token_id or processor.tokenizer.pad_token_id
+    )
     model.config.eos_token_id = processor.tokenizer.eos_token_id
     model.config.max_length = 256
 
     # 4️⃣ Preprocess
     preprocess_fn = make_preprocess_fn(processor)
-    dataset = dataset.map(
-        preprocess_fn,
-        batched=True,
-        remove_columns=dataset["train"].column_names,
-        keep_in_memory=True,     # ✅ keeps data in RAM, not on disk
-        load_from_cache_file=False
-    )
+    dataset = dataset.map(preprocess_fn, batched=True)
 
-
-    # ✅ Convert all columns to torch tensors (fixes collate issue)
     dataset.set_format(type="torch", columns=["pixel_values", "labels"])
 
-
-    # 5️⃣ Memory optimizations
+    # 5️⃣ Memory optimization
     model.gradient_checkpointing_enable()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -199,7 +198,7 @@ def main():
         learning_rate=5e-5,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=4,   # accumulate more to save VRAM
+        gradient_accumulation_steps=4,
         predict_with_generate=True,
         generation_max_length=256,
         fp16=torch.cuda.is_available(),
@@ -208,10 +207,9 @@ def main():
         logging_dir=os.path.join(out_dir, "logs"),
         logging_steps=50,
         save_total_limit=2,
-        report_to=[],  # disable wandb
+        report_to=[],  # no wandb
     )
 
-    # 7️⃣ Trainer
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
@@ -221,11 +219,10 @@ def main():
         data_collator=donut_collate_fn,
     )
 
-    print("🚀 Starting Donut fine-tuning (lightweight mode)...")
+    print("🚀 Starting Donut fine-tuning (Kaggle-optimized)...")
     trainer.train()
     print("✅ Training complete!")
 
-    # 8️⃣ Save model
     final_dir = os.path.join(out_dir, "final_model")
     os.makedirs(final_dir, exist_ok=True)
     model.save_pretrained(final_dir)
