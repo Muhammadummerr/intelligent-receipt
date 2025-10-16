@@ -122,7 +122,7 @@ def preprocess_function(examples, processor):
 # ---------------------------------------
 def main():
     data_root = "/kaggle/input/receipt-dataset"
-    model_id = "naver-clova-ix/donut-small-finetuned-cord-v2"
+    model_id = "naver-clova-ix/donut-small"
     out_dir = "./outputs_donut"
 
     os.makedirs(out_dir, exist_ok=True)
@@ -153,7 +153,7 @@ def main():
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=2,
         predict_with_generate=True,
-        fp16=torch.cuda.is_available(),
+        fp16=True,
         save_strategy="epoch",
         evaluation_strategy="epoch",
         logging_dir=os.path.join(out_dir, "logs"),
