@@ -114,7 +114,7 @@ def donut_collate(batch):
 # ------------------ Main Training ------------------ #
 def main():
     data_root = "/kaggle/input/receipt-dataset"
-    model_id = "naver-clova-ix/donut-base"
+    model_id = "Bennet1996/donut-small"
     out_dir = "/kaggle/temp/outputs_donut"
     os.makedirs(out_dir, exist_ok=True)
 
