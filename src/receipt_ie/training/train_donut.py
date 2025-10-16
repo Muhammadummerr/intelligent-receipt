@@ -47,6 +47,21 @@ def load_entity_file(path):
         print(f"⚠️ Failed to read {path}: {e}")
         return {}
 
+from transformers import DonutProcessor
+
+# Custom data collator for Donut
+def donut_collate_fn(batch):
+    pixel_values = torch.stack([x["pixel_values"] for x in batch])
+    labels = torch.nn.utils.rnn.pad_sequence(
+        [x["labels"] for x in batch],
+        batch_first=True,
+        padding_value=-100,
+    )
+    return {
+        "pixel_values": pixel_values,
+        "labels": labels,
+    }
+
 
 # ---------------------------------------
 # Step 1: Build Dataset JSONs for Donut
@@ -122,7 +137,7 @@ def preprocess_function(examples, processor):
 # ---------------------------------------
 def main():
     data_root = "/kaggle/input/receipt-dataset"
-    model_id = "Bennet1996/donut-small"
+    model_id = "naver-clova-ix/donut-base"
     out_dir = "./outputs_donut"
 
     os.makedirs(out_dir, exist_ok=True)
@@ -159,6 +174,7 @@ def main():
         logging_dir=os.path.join(out_dir, "logs"),
         logging_steps=50,
         save_total_limit=2,
+        data_collator=donut_collate_fn,
     )
 
     # Step 5: trainer
@@ -168,6 +184,7 @@ def main():
         train_dataset=dataset["train"],
         eval_dataset=dataset["validation"],
         tokenizer=processor.tokenizer,
+        data_collator=donut_collate_fn,
     )
 
     print("🚀 Starting Donut fine-tuning...")
