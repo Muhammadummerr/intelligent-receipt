@@ -2,11 +2,9 @@
 train_donut_qlora.py
 --------------------
 Fine-tunes Donut using QLoRA (4-bit quantization + LoRA adapters)
-✅ Fits easily on Kaggle T4/P100 (≤8 GB VRAM)
-✅ 256x256 image resizing for smaller encoder footprint
-✅ Gradient checkpointing + accumulation
-✅ In-memory dataset loading (no Arrow cache)
-✅ Disables W&B + HF caching
+✅ Works with Kaggle T4/P100 (≤8 GB VRAM)
+✅ Uses 256×256 images for efficiency
+✅ Includes compatibility fixes for PEFT + Accelerate
 """
 
 import os
@@ -24,9 +22,7 @@ from transformers import (
 from peft import LoraConfig, get_peft_model, TaskType
 from tqdm import tqdm
 
-# ---------------------------------------------------------
-# Environment & cache control
-# ---------------------------------------------------------
+# ---------------- Environment setup ---------------- #
 os.environ["WANDB_DISABLED"] = "true"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HF_DATASETS_DISABLE_CACHE"] = "1"
@@ -35,11 +31,8 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 
 
-# ---------------------------------------------------------
-# Utility: Load entity annotations
-# ---------------------------------------------------------
+# ---------------- Load entity file ---------------- #
 def load_entity_file(path):
-    """Read JSON or TXT entity file into a dict."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = f.read().strip()
@@ -57,9 +50,7 @@ def load_entity_file(path):
         return {}
 
 
-# ---------------------------------------------------------
-# Step 1: Build JSON dataset
-# ---------------------------------------------------------
+# ---------------- Build JSON dataset ---------------- #
 def build_donut_json(data_root, split="train", output_json="train.json"):
     img_dir = os.path.join(data_root, split, "img")
     ent_dir = os.path.join(data_root, split, "entities")
@@ -100,9 +91,7 @@ def build_donut_json(data_root, split="train", output_json="train.json"):
     return output_json
 
 
-# ---------------------------------------------------------
-# Step 2: Load dataset into memory
-# ---------------------------------------------------------
+# ---------------- Load dataset in memory ---------------- #
 def load_json_dataset(train_json, val_json):
     with open(train_json, "r", encoding="utf-8") as f:
         train_data = [json.loads(line) for line in f]
@@ -114,19 +103,16 @@ def load_json_dataset(train_json, val_json):
     })
 
 
-# ---------------------------------------------------------
-# Step 3: Preprocessing
-# ---------------------------------------------------------
+# ---------------- Preprocess function ---------------- #
 def make_preprocess_fn(processor):
     eos_id = processor.tokenizer.eos_token_id
 
     def _fn(examples):
         pixel_values, labels = [], []
         for image_path, gt in zip(examples["image"], examples["ground_truth"]):
-            image = Image.open(image_path).convert("RGB")
-            image = image.resize((256, 256))  # smaller resolution for Kaggle GPUs
-
+            image = Image.open(image_path).convert("RGB").resize((256, 256))
             pv = processor(image, return_tensors="pt").pixel_values.squeeze(0)
+
             ids = processor.tokenizer(
                 gt, add_special_tokens=False, return_tensors="pt"
             ).input_ids.squeeze(0)
@@ -143,40 +129,35 @@ def make_preprocess_fn(processor):
     return _fn
 
 
-# ---------------------------------------------------------
-# Step 4: Collator
-# ---------------------------------------------------------
+# ---------------- Collator ---------------- #
 def donut_collate_fn(batch):
-    pixel_values = torch.stack([torch.as_tensor(b["pixel_values"]) for b in batch])
-    lengths = [x["labels"].size(0) for x in batch]
-    max_len = max(lengths)
+    pixel_values = torch.stack([b["pixel_values"] for b in batch])
+    max_len = max(x["labels"].size(0) for x in batch)
     labels = torch.full((len(batch), max_len), -100, dtype=torch.long)
     for i, x in enumerate(batch):
-        seq = x["labels"]
-        labels[i, : seq.size(0)] = seq
+        labels[i, : x["labels"].size(0)] = x["labels"]
     return {"pixel_values": pixel_values, "labels": labels}
 
 
-# ---------------------------------------------------------
-# Step 5: Training (QLoRA)
-# ---------------------------------------------------------
+# ---------------- QLoRA training ---------------- #
 def main():
     data_root = "/kaggle/input/receipt-dataset"
     model_id = "naver-clova-ix/donut-base"  # or Bennet1996/donut-small
     out_dir = "/kaggle/temp/outputs_donut"
     os.makedirs(out_dir, exist_ok=True)
 
-    # 1️⃣ Build JSON files
+    # 1️⃣ Build JSON
     train_json = build_donut_json(data_root, "train", os.path.join(out_dir, "train.json"))
     val_json = build_donut_json(data_root, "test", os.path.join(out_dir, "val.json"))
 
     # 2️⃣ Load dataset
     dataset = load_json_dataset(train_json, val_json)
 
-    # 3️⃣ Processor + model (4-bit quantized)
+    # 3️⃣ Processor + 4-bit model
     processor = DonutProcessor.from_pretrained(model_id)
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
+        bnb_4bit_use_double_quant=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=torch.float16,
     )
@@ -193,12 +174,12 @@ def main():
         r=16,
         lora_alpha=32,
         lora_dropout=0.1,
-        target_modules=["q", "v", "k", "o", "fc1", "fc2"],
+        target_modules=["q_proj", "v_proj"],  # safer subset
     )
     model = get_peft_model(model, lora_cfg)
     model.print_trainable_parameters()
 
-    # 5️⃣ Tokenizer & model config
+    # 5️⃣ Tokenizer & model setup
     processor.tokenizer.pad_token = processor.tokenizer.eos_token
     model.config.pad_token_id = processor.tokenizer.pad_token_id
     model.config.decoder_start_token_id = (
@@ -206,7 +187,6 @@ def main():
     )
     model.config.eos_token_id = processor.tokenizer.eos_token_id
     model.config.max_length = 128
-    generation_max_length = 128
 
     # 6️⃣ Preprocess
     preprocess_fn = make_preprocess_fn(processor)
@@ -218,26 +198,24 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # 8️⃣ Training args
+    # 8️⃣ Training arguments
     training_args = Seq2SeqTrainingArguments(
         output_dir=out_dir,
-        num_train_epochs=10,
-        learning_rate=2e-4,  # higher since only LoRA layers train
+        num_train_epochs=8,
+        learning_rate=2e-4,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=8,
         predict_with_generate=True,
         generation_max_length=128,
-        fp16=torch.cuda.is_available(),
+        fp16=True,
         save_strategy="epoch",
         evaluation_strategy="epoch",
         logging_dir=os.path.join(out_dir, "logs"),
-        logging_steps=50,
         save_total_limit=2,
         report_to=[],
     )
 
-    # 9️⃣ Trainer
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
@@ -251,12 +229,12 @@ def main():
     trainer.train()
     print("✅ Training complete!")
 
-    # 🔟 Save adapter weights + processor
+    # 🔟 Save only adapters + processor
     final_dir = os.path.join(out_dir, "final_model_lora")
     os.makedirs(final_dir, exist_ok=True)
     model.save_pretrained(final_dir)
     processor.save_pretrained(final_dir)
-    print(f"🏁 Saved QLoRA fine-tuned Donut model to {final_dir}")
+    print(f"🏁 Saved QLoRA fine-tuned Donut adapters to {final_dir}")
 
 
 if __name__ == "__main__":
