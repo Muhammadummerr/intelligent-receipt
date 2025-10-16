@@ -153,11 +153,26 @@ def main():
     val_json = build_donut_json(data_root, "test", os.path.join(out_dir, "val.json"))
     dataset = load_json_dataset(train_json, val_json)
 
-    # 2️⃣ Load processor + model
+    # 2) Load processor + model
     processor = DonutProcessor.from_pretrained(model_id)
     model = VisionEncoderDecoderModel.from_pretrained(model_id)
 
-    # Model configuration
+    # --- PATCH: make the wrapper expose decoder embeddings for PEFT ---
+    import types
+
+    def _get_input_embeddings(self):
+        # route to the text decoder’s embedding layer
+        return self.decoder.get_input_embeddings()
+
+    def _set_input_embeddings(self, new_emb):
+        # route assignment to the text decoder
+        return self.decoder.set_input_embeddings(new_emb)
+
+    model.get_input_embeddings = types.MethodType(_get_input_embeddings, model)
+    model.set_input_embeddings = types.MethodType(_set_input_embeddings, model)
+    # -------------------------------------------------------------------
+
+    # config & memory helpers
     processor.tokenizer.pad_token = processor.tokenizer.eos_token
     model.config.pad_token_id = processor.tokenizer.pad_token_id
     model.config.decoder_start_token_id = processor.tokenizer.bos_token_id or processor.tokenizer.pad_token_id
@@ -167,16 +182,16 @@ def main():
     model.decoder.config.use_cache = False
     model.gradient_checkpointing_enable()
 
-    # 3️⃣ Attach LoRA adapters (decoder-only)
+    # LoRA on decoder-only modules (PEFT will now initialize cleanly)
+    from peft import LoraConfig, get_peft_model, TaskType
     lora_cfg = LoraConfig(
         task_type=TaskType.SEQ_2_SEQ_LM,
-        r=16,
-        lora_alpha=32,
-        lora_dropout=0.05,
+        r=16, lora_alpha=32, lora_dropout=0.05,
         target_modules=["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"],
     )
     model = get_peft_model(model, lora_cfg)
     model.print_trainable_parameters()
+
 
     # 4️⃣ Preprocess
     preprocess = make_preprocess_fn(processor)
