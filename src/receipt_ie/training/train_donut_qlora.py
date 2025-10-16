@@ -178,7 +178,7 @@ def main():
     processor = DonutProcessor.from_pretrained(model_id)
     model = VisionEncoderDecoderModel.from_pretrained(model_id)
     # --- PATCH: prevent input_ids being sent to the vision encoder ---
-    -# --- FINAL PATCH: safe forward for Donut VisionEncoderDecoderModel ---
+    # --- FINAL PATCH: safe forward for Donut VisionEncoderDecoderModel ---
     import types
 
     def patched_forward(self, pixel_values=None, labels=None, **kwargs):
