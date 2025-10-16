@@ -1,11 +1,12 @@
 """
-train_donut_lora_kaggle.py
+train_donut_lora_fixed.py
 --------------------------
-LoRA fine-tuning for Donut on Kaggle GPUs (no bitsandbytes).
+Stable LoRA fine-tuning for Donut on Kaggle GPUs (no bitsandbytes).
 - Works on T4/P100 (<=8GB VRAM)
 - Image resize 224x224
-- In-memory dataset (no Arrow cache)
-- Custom Trainer that never passes `input_ids` or `attention_mask` to encoder
+- In-memory dataset
+- LoRA applied to decoder only (fixes input_ids bug)
+- Freezes encoder for stability
 """
 
 import os
@@ -21,6 +22,7 @@ from transformers import (
 )
 from peft import LoraConfig, get_peft_model, TaskType
 from tqdm import tqdm
+import types
 
 # -------------------- Environment --------------------
 os.environ["WANDB_DISABLED"] = "true"
@@ -153,26 +155,20 @@ def main():
     val_json = build_donut_json(data_root, "test", os.path.join(out_dir, "val.json"))
     dataset = load_json_dataset(train_json, val_json)
 
-    # 2) Load processor + model
+    # 2️⃣ Load processor + model
     processor = DonutProcessor.from_pretrained(model_id)
     model = VisionEncoderDecoderModel.from_pretrained(model_id)
 
-    # --- PATCH: make the wrapper expose decoder embeddings for PEFT ---
-    import types
-
+    # --- Ensure correct embedding routing for PEFT ---
     def _get_input_embeddings(self):
-        # route to the text decoder’s embedding layer
         return self.decoder.get_input_embeddings()
-
     def _set_input_embeddings(self, new_emb):
-        # route assignment to the text decoder
         return self.decoder.set_input_embeddings(new_emb)
-
     model.get_input_embeddings = types.MethodType(_get_input_embeddings, model)
     model.set_input_embeddings = types.MethodType(_set_input_embeddings, model)
-    # -------------------------------------------------------------------
+    # --------------------------------------------------
 
-    # config & memory helpers
+    # 3️⃣ Tokenizer + config setup
     processor.tokenizer.pad_token = processor.tokenizer.eos_token
     model.config.pad_token_id = processor.tokenizer.pad_token_id
     model.config.decoder_start_token_id = processor.tokenizer.bos_token_id or processor.tokenizer.pad_token_id
@@ -182,23 +178,28 @@ def main():
     model.decoder.config.use_cache = False
     model.gradient_checkpointing_enable()
 
-    # LoRA on decoder-only modules (PEFT will now initialize cleanly)
-    from peft import LoraConfig, get_peft_model, TaskType
+    # 4️⃣ LoRA — apply to decoder only
     lora_cfg = LoraConfig(
         task_type=TaskType.SEQ_2_SEQ_LM,
-        r=16, lora_alpha=32, lora_dropout=0.05,
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.05,
         target_modules=["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"],
     )
-    model = get_peft_model(model, lora_cfg)
+
+    model.decoder = get_peft_model(model.decoder, lora_cfg)
     model.print_trainable_parameters()
 
+    # ✅ Freeze encoder
+    for p in model.encoder.parameters():
+        p.requires_grad = False
 
-    # 4️⃣ Preprocess
+    # 5️⃣ Preprocess dataset
     preprocess = make_preprocess_fn(processor)
     dataset = dataset.map(preprocess, batched=True)
     dataset.set_format(type="torch", columns=["pixel_values", "labels"])
 
-    # 5️⃣ Training
+    # 6️⃣ Training arguments
     args = Seq2SeqTrainingArguments(
         output_dir=out_dir,
         num_train_epochs=10,
@@ -208,6 +209,7 @@ def main():
         gradient_accumulation_steps=4,
         predict_with_generate=True,
         generation_max_length=128,
+        generation_num_beams=3,
         fp16=torch.cuda.is_available(),
         save_strategy="epoch",
         evaluation_strategy="epoch",
@@ -216,6 +218,9 @@ def main():
         save_total_limit=2,
         remove_unused_columns=False,
         report_to=[],
+        weight_decay=0.01,
+        warmup_ratio=0.06,
+        lr_scheduler_type="cosine",
     )
 
     trainer = DonutTrainer(
@@ -226,7 +231,7 @@ def main():
         data_collator=donut_collate_fn,
     )
 
-    print("🚀 Fine-tuning Donut with LoRA (Kaggle-safe)…")
+    print("🚀 Fine-tuning Donut with Decoder-Only LoRA (Kaggle-safe)…")
     trainer.train()
     print("✅ Training complete!")
 
