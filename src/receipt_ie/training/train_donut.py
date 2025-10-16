@@ -177,19 +177,32 @@ def main():
     eos_id = processor.tokenizer.eos_token_id
 
     def transform(example):
-        # called per-sample by Datasets only when the row is fetched
-        image = Image.open(example["image"]).convert("RGB").resize((IMG_SIZE, IMG_SIZE))
-        pv = processor(image, return_tensors="pt").pixel_values.squeeze(0)
-        ids = processor.tokenizer(
-            example["ground_truth"],
-            add_special_tokens=False,
-            return_tensors="pt",
-            truncation=True,
-            max_length=256
-        ).input_ids.squeeze(0)
-        if eos_id is not None:
-            ids = torch.cat([ids, torch.tensor([eos_id], dtype=torch.long)])
-        return {"pixel_values": pv, "labels": ids}
+    # Handle both single and batched examples
+        def process_one(img_path, gt_text):
+            image = Image.open(img_path).convert("RGB").resize((IMG_SIZE, IMG_SIZE))
+            pv = processor(image, return_tensors="pt").pixel_values.squeeze(0)
+            ids = processor.tokenizer(
+                gt_text,
+                add_special_tokens=False,
+                return_tensors="pt",
+                truncation=True,
+                max_length=256
+            ).input_ids.squeeze(0)
+            if eos_id is not None:
+                ids = torch.cat([ids, torch.tensor([eos_id], dtype=torch.long)])
+            return pv, ids
+
+        if isinstance(example["image"], list):  # batched
+            pixel_values, labels = [], []
+            for img, gt in zip(example["image"], example["ground_truth"]):
+                pv, ids = process_one(img, gt)
+                pixel_values.append(pv)
+                labels.append(ids)
+            return {"pixel_values": pixel_values, "labels": labels}
+        else:  # single
+            pv, ids = process_one(example["image"], example["ground_truth"])
+            return {"pixel_values": pv, "labels": ids}
+
 
     dataset["train"] = dataset["train"].with_transform(transform)
     dataset["validation"] = dataset["validation"].with_transform(transform)
