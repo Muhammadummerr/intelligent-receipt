@@ -24,7 +24,9 @@ import argparse
 from typing import Dict, Any
 from ..utils.llm_client import LLMClient
 from ..utils.postproc import clean_company, soft_addr_norm, norm_date, soft_total_norm
-from .predict_layoutlmv3 import run_inference_single
+# from .predict_layoutlmv3 import run_inference_single
+from .predict_donut import run_inference_single
+
 
 
 # ------------------------------ Safe JSON Loader ------------------------------ #
