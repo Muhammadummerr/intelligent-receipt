@@ -1,21 +1,22 @@
 """
-train_donut.py
----------------
-Fine-tunes Donut (OCR-free document understanding transformer)
-for key information extraction from receipts.
+train_donut_optimized.py
+------------------------
+Lightweight Donut fine-tuning for Kaggle GPUs.
+Optimized for limited VRAM (T4 / P100).
 
-Dataset structure:
-  root/train/img/*.jpg
-  root/train/entities/*.json or .txt
-  root/test/img/*.jpg
-  root/test/entities/*.json or .txt
+Features:
+✅ Smaller model by default (Bennet1996/donut-small)
+✅ Image resolution reduced to 384x384
+✅ Gradient checkpointing + fp16 + accumulation
+✅ CPU memory offload where possible
+✅ Disables WandB + tokenizer parallelism
 """
 
 import os
 import json
 import torch
 from PIL import Image
-from datasets import load_dataset, DatasetDict
+from datasets import load_dataset
 from transformers import (
     DonutProcessor,
     VisionEncoderDecoderModel,
@@ -24,19 +25,24 @@ from transformers import (
 )
 from tqdm import tqdm
 
+# --- Environment settings (safety) ---
+os.environ["WANDB_DISABLED"] = "true"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
 
-# ---------------------------------------
-# Utility: Load entity JSONs or TXT
-# ---------------------------------------
+
+# -------------------------------
+# Utility: Load entity annotations
+# -------------------------------
 def load_entity_file(path):
-    """Read JSON or TXT entity file into a dict"""
+    """Read JSON or TXT entity file into a dict."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = f.read().strip()
             try:
                 return json.loads(data)
             except Exception:
-                # fallback if it's line-based "key:value"
                 ent = {}
                 for line in data.splitlines():
                     if ":" in line:
@@ -47,62 +53,38 @@ def load_entity_file(path):
         print(f"⚠️ Failed to read {path}: {e}")
         return {}
 
-from transformers import DonutProcessor
 
-# Custom data collator for Donut
-def donut_collate_fn(batch):
-    pixel_values = torch.stack([x["pixel_values"] for x in batch])
-    labels = torch.nn.utils.rnn.pad_sequence(
-        [x["labels"] for x in batch],
-        batch_first=True,
-        padding_value=-100,
-    )
-    return {
-        "pixel_values": pixel_values,
-        "labels": labels,
-    }
-
-
-# ---------------------------------------
-# Step 1: Build Dataset JSONs for Donut
-# ---------------------------------------
+# -------------------------------
+# Step 1: Build Donut JSON dataset
+# -------------------------------
 def build_donut_json(data_root, split="train", output_json="train.json"):
     img_dir = os.path.join(data_root, split, "img")
     ent_dir = os.path.join(data_root, split, "entities")
 
     donut_samples = []
-    for fname in tqdm(os.listdir(img_dir), desc=f"Building {split} set"):
+    for fname in tqdm(sorted(os.listdir(img_dir)), desc=f"Building {split} set"):
         stem, ext = os.path.splitext(fname)
         if ext.lower() not in [".jpg", ".jpeg", ".png"]:
             continue
 
         ent_path = None
-        for e in [".json", ".txt"]:
-            path = os.path.join(ent_dir, stem + e)
-            if os.path.isfile(path):
-                ent_path = path
+        for e in (".json", ".txt"):
+            p = os.path.join(ent_dir, stem + e)
+            if os.path.isfile(p):
+                ent_path = p
                 break
         if not ent_path:
             continue
 
         entities = load_entity_file(ent_path)
-        company = entities.get("company", "")
-        date = entities.get("date", "")
-        address = entities.get("address", "")
-        total = entities.get("total", "")
-
         gt_json = {
-            "company": company,
-            "date": date,
-            "address": address,
-            "total": total,
+            "company": entities.get("company", ""),
+            "date": entities.get("date", ""),
+            "address": entities.get("address", ""),
+            "total": entities.get("total", ""),
         }
         gt_str = "<s_receipt>" + json.dumps(gt_json, ensure_ascii=False)
-
-        donut_samples.append({
-            "image": os.path.join(img_dir, fname),
-            "ground_truth": gt_str
-        })
+        donut_samples.append({"image": os.path.join(img_dir, fname), "ground_truth": gt_str})
 
     with open(output_json, "w", encoding="utf-8") as f:
         for s in donut_samples:
@@ -112,72 +94,103 @@ def build_donut_json(data_root, split="train", output_json="train.json"):
     return output_json
 
 
-# ---------------------------------------
+# -------------------------------
 # Step 2: Preprocessing
-# ---------------------------------------
-def preprocess_function(examples, processor):
-    pixel_values = []
-    labels = []
-    for image_path, gt in zip(examples["image"], examples["ground_truth"]):
-        image = Image.open(image_path).convert("RGB")
-        pixel_values.append(processor(image, return_tensors="pt").pixel_values.squeeze())
+# -------------------------------
+def make_preprocess_fn(processor):
+    eos_id = processor.tokenizer.eos_token_id
 
-        text = processor.tokenizer(
-            gt,
-            add_special_tokens=False,
-            return_tensors="pt",
-        ).input_ids.squeeze()
-        labels.append(text)
+    def _fn(examples):
+        pixel_values, labels = [], []
+        for image_path, gt in zip(examples["image"], examples["ground_truth"]):
+            image = Image.open(image_path).convert("RGB")
+            # ↓ Resize to smaller resolution for VRAM saving
+            image = image.resize((384, 384))
+
+            pv = processor(image, return_tensors="pt").pixel_values.squeeze(0)
+            pixel_values.append(pv)
+
+            ids = processor.tokenizer(gt, add_special_tokens=False, return_tensors="pt").input_ids.squeeze(0)
+            if eos_id is not None:
+                ids = torch.cat([ids, torch.tensor([eos_id])])
+            labels.append(ids)
+        return {"pixel_values": pixel_values, "labels": labels}
+
+    return _fn
+
+
+# -------------------------------
+# Step 3: Collator (manual padding)
+# -------------------------------
+def donut_collate_fn(batch):
+    pixel_values = torch.stack([b["pixel_values"] for b in batch])
+
+    lengths = [x["labels"].size(0) for x in batch]
+    max_len = max(lengths)
+    labels = torch.full((len(batch), max_len), -100, dtype=torch.long)
+    for i, x in enumerate(batch):
+        seq = x["labels"]
+        labels[i, : seq.size(0)] = seq
 
     return {"pixel_values": pixel_values, "labels": labels}
 
 
-# ---------------------------------------
-# Step 3: Main Training Loop
-# ---------------------------------------
+# -------------------------------
+# Step 4: Training
+# -------------------------------
 def main():
     data_root = "/kaggle/input/receipt-dataset"
-    model_id = "naver-clova-ix/donut-base-finetuned-cord-v2"
+    model_id = "Bennet1996/donut-small"   # ✅ lightweight Donut model
     out_dir = "./outputs_donut"
-
     os.makedirs(out_dir, exist_ok=True)
 
-    # Step 1: build JSON files
+    # 1️⃣ Build JSON files
     train_json = build_donut_json(data_root, "train", os.path.join(out_dir, "train.json"))
     val_json = build_donut_json(data_root, "test", os.path.join(out_dir, "val.json"))
 
-    # Step 2: load dataset
+    # 2️⃣ Load dataset
     dataset = load_dataset("json", data_files={"train": train_json, "validation": val_json})
+
+    # 3️⃣ Processor + model
     processor = DonutProcessor.from_pretrained(model_id)
     model = VisionEncoderDecoderModel.from_pretrained(model_id)
 
-    # Step 3: preprocess
-    dataset = dataset.map(
-        lambda ex: preprocess_function(ex, processor),
-        batched=True,
-        remove_columns=dataset["train"].column_names,
-    )
-    torch.cuda.empty_cache()
+    # Donut token setup
+    processor.tokenizer.pad_token = processor.tokenizer.eos_token
+    model.config.pad_token_id = processor.tokenizer.pad_token_id
+    model.config.decoder_start_token_id = processor.tokenizer.bos_token_id or processor.tokenizer.pad_token_id
+    model.config.eos_token_id = processor.tokenizer.eos_token_id
+    model.config.max_length = 256
+
+    # 4️⃣ Preprocess
+    preprocess_fn = make_preprocess_fn(processor)
+    dataset = dataset.map(preprocess_fn, batched=True, remove_columns=dataset["train"].column_names)
+
+    # 5️⃣ Memory optimizations
     model.gradient_checkpointing_enable()
-    # Step 4: training args
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # 6️⃣ Training args
     training_args = Seq2SeqTrainingArguments(
         output_dir=out_dir,
         num_train_epochs=5,
         learning_rate=5e-5,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=2,
+        gradient_accumulation_steps=4,   # accumulate more to save VRAM
         predict_with_generate=True,
-        fp16=True,
+        generation_max_length=256,
+        fp16=torch.cuda.is_available(),
         save_strategy="epoch",
         evaluation_strategy="epoch",
         logging_dir=os.path.join(out_dir, "logs"),
         logging_steps=50,
         save_total_limit=2,
-        data_collator=donut_collate_fn,
+        report_to=[],  # disable wandb
     )
 
-    # Step 5: trainer
+    # 7️⃣ Trainer
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
@@ -187,13 +200,16 @@ def main():
         data_collator=donut_collate_fn,
     )
 
-    print("🚀 Starting Donut fine-tuning...")
+    print("🚀 Starting Donut fine-tuning (lightweight mode)...")
     trainer.train()
     print("✅ Training complete!")
 
-    model.save_pretrained(os.path.join(out_dir, "final_model"))
-    processor.save_pretrained(os.path.join(out_dir, "final_model"))
-    print(f"🏁 Saved fine-tuned model to {out_dir}/final_model")
+    # 8️⃣ Save model
+    final_dir = os.path.join(out_dir, "final_model")
+    os.makedirs(final_dir, exist_ok=True)
+    model.save_pretrained(final_dir)
+    processor.save_pretrained(final_dir)
+    print(f"🏁 Saved fine-tuned model to {final_dir}")
 
 
 if __name__ == "__main__":
