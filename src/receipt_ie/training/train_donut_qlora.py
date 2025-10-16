@@ -188,7 +188,7 @@ def main():
     )
 
     model.decoder = get_peft_model(model.decoder, lora_cfg)
-    model.print_trainable_parameters()
+    # model.print_trainable_parameters()
 
     # ✅ Freeze encoder
     for p in model.encoder.parameters():
