@@ -121,7 +121,9 @@ def make_preprocess_fn(processor):
         pixel_values, labels = [], []
         for image_path, gt in zip(examples["image"], examples["ground_truth"]):
             image = Image.open(image_path).convert("RGB")
-            image = image.resize((384, 384))
+            # image = image.resize((384, 384))
+            image = image.resize((256, 256))
+
 
             pv = processor(image, return_tensors="pt").pixel_values.squeeze(0)
             ids = processor.tokenizer(gt, add_special_tokens=False, return_tensors="pt").input_ids.squeeze(0)
@@ -171,7 +173,8 @@ def main():
     # 3️⃣ Processor & model
     processor = DonutProcessor.from_pretrained(model_id)
     model = VisionEncoderDecoderModel.from_pretrained(model_id)
-
+    model.config.max_length = 128
+    generation_max_length = 128
     processor.tokenizer.pad_token = processor.tokenizer.eos_token
     model.config.pad_token_id = processor.tokenizer.pad_token_id
     model.config.decoder_start_token_id = (
