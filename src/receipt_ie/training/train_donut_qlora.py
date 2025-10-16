@@ -203,7 +203,7 @@ def main():
 
     # Memory helpers
     model.gradient_checkpointing_enable()
-    model.enable_input_require_grads()
+    # model.enable_input_require_grads()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
