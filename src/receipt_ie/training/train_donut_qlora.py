@@ -5,7 +5,7 @@ Stable LoRA fine-tuning for Donut on Kaggle GPUs (no bitsandbytes).
 - Works on T4/P100 (<=8GB VRAM)
 - Image resize 224x224
 - In-memory dataset
-- LoRA applied to decoder only (fixes input_ids bug)
+- LoRA applied to decoder.model (NOT the ForCausalLM wrapper) ← fixes kwarg bug
 - Freezes encoder for stability
 """
 
@@ -159,14 +159,14 @@ def main():
     processor = DonutProcessor.from_pretrained(model_id)
     model = VisionEncoderDecoderModel.from_pretrained(model_id)
 
-    # --- Ensure correct embedding routing for PEFT ---
+    # --- Route embedding getters to decoder for PEFT safety ---
     def _get_input_embeddings(self):
         return self.decoder.get_input_embeddings()
     def _set_input_embeddings(self, new_emb):
         return self.decoder.set_input_embeddings(new_emb)
     model.get_input_embeddings = types.MethodType(_get_input_embeddings, model)
     model.set_input_embeddings = types.MethodType(_set_input_embeddings, model)
-    # --------------------------------------------------
+    # ----------------------------------------------------------
 
     # 3️⃣ Tokenizer + config setup
     processor.tokenizer.pad_token = processor.tokenizer.eos_token
@@ -178,7 +178,7 @@ def main():
     model.decoder.config.use_cache = False
     model.gradient_checkpointing_enable()
 
-    # 4️⃣ LoRA — apply to decoder only
+    # 4️⃣ LoRA — apply to the *internal* transformer blocks, not the ForCausalLM wrapper
     lora_cfg = LoraConfig(
         task_type=TaskType.SEQ_2_SEQ_LM,
         r=16,
@@ -187,10 +187,21 @@ def main():
         target_modules=["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"],
     )
 
-    model.decoder = get_peft_model(model.decoder, lora_cfg)
-    # model.print_trainable_parameters()
+    # IMPORTANT: wrap the underlying decoder.transformer (e.g., MBartModel) to keep forward() signature intact
+    # MBartForCausalLM has attribute `.model` which holds the transformer stack.
+    model.decoder.model = get_peft_model(model.decoder.model, lora_cfg)
 
-    # ✅ Freeze encoder
+    # Show trainable params (includes LoRA params only)
+    try:
+        model.decoder.model.print_trainable_parameters()
+    except Exception:
+        # fallback if PEFT version lacks the helper
+        trainable = sum(p.numel() for p in model.decoder.model.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in model.parameters())
+        print(f"trainable params (decoder.model): {trainable} / {total} "
+              f"({100.0 * trainable / total:.4f}%)")
+
+    # ✅ Freeze encoder (vision side)
     for p in model.encoder.parameters():
         p.requires_grad = False
 
@@ -231,7 +242,7 @@ def main():
         data_collator=donut_collate_fn,
     )
 
-    print("🚀 Fine-tuning Donut with Decoder-Only LoRA (Kaggle-safe)…")
+    print("🚀 Fine-tuning Donut with LoRA on decoder.model (Kaggle-safe)…")
     trainer.train()
     print("✅ Training complete!")
 
