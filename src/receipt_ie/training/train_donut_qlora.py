@@ -178,28 +178,30 @@ def main():
     processor = DonutProcessor.from_pretrained(model_id)
     model = VisionEncoderDecoderModel.from_pretrained(model_id)
     # --- PATCH: prevent input_ids being sent to the vision encoder ---
+    -# --- FINAL PATCH: safe forward for Donut VisionEncoderDecoderModel ---
+    import types
+
     def patched_forward(self, pixel_values=None, labels=None, **kwargs):
-        """Filters out invalid kwargs before passing to encoder."""
-        # Filter any 'input_ids' or text-only arguments
-        encoder_kwargs = {
-            k: v for k, v in kwargs.items() if k in ["pixel_values", "attention_mask", "output_attentions", "output_hidden_states", "return_dict"]
-        }
+        """
+        Custom forward that ensures Donut's encoder (Swin) gets only valid arguments.
+        """
+        # Encoder forward — only pass pixel_values!
+        encoder_outputs = self.encoder(pixel_values=pixel_values, return_dict=True)
+        encoder_hidden_states = encoder_outputs.last_hidden_state
 
-        encoder_outputs = self.encoder(pixel_values=pixel_values, **encoder_kwargs)
-        encoder_hidden_states = encoder_outputs[0]
-
-        # Decoder forward pass (teacher forcing if labels provided)
+        # Decoder forward (teacher forcing if labels provided)
         decoder_inputs = {
             "encoder_hidden_states": encoder_hidden_states,
             "labels": labels,
             "return_dict": True,
         }
-        return self.decoder(**decoder_inputs)
+        outputs = self.decoder(**decoder_inputs)
+        return outputs
 
-    # Monkey patch the forward method
-    import types
     model.forward = types.MethodType(patched_forward, model)
-    print("✅ Patched model.forward() to ignore 'input_ids' for Donut encoder.")
+    print("✅ Patched model.forward(): safe for Donut (no attention_mask, no input_ids).")
+
+
 
 
     # Tokenizer/model config
