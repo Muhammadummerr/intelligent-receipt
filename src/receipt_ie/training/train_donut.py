@@ -122,7 +122,7 @@ def preprocess_function(examples, processor):
 # ---------------------------------------
 def main():
     data_root = "/kaggle/input/receipt-dataset"
-    model_id = "naver-clova-ix/donut-base-finetuned-receipts"
+    model_id = "naver-clova-ix/donut-base-finetuned-cord-v2"
     out_dir = "./outputs_donut"
 
     os.makedirs(out_dir, exist_ok=True)
