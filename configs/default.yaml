@@ -13,8 +13,9 @@ data:
 
 model:
   backend: layoutlmv3
-  max_seq_len: 1024
-  batch_size: 8
+model:
+  max_seq_len: 512  # instead of 1024
+  batch_size: 4     # or even 1 if using large images
   lr: 1.0e-5          # ↓ smaller LR for fine-tuning
   weight_decay: 0.05
   epochs: 15          # micro-tuning phase

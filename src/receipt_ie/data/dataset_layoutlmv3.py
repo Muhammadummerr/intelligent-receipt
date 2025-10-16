@@ -279,36 +279,40 @@ class ReceiptLayoutLMv3Dataset:
 
     # -------------------------------------------------------------- #
     def __getitem__(self, idx: int):
-        from .boxes import BoxLine  
+        from .boxes import BoxLine
+        import torch
 
         stem, image, W, H, lines, ent = self._read_item(idx)
 
-        
+        # --- Caching: skip recomputation if cached ---
+        cache_path = os.path.join(self.cache_dir, f"{stem}.pt")
+        if os.path.exists(cache_path):
+            try:
+                return torch.load(cache_path)
+            except Exception:
+                print(f"⚠️ Corrupted cache for {stem}, regenerating...")
 
-        # Properly expand AABB to 8-coordinate quad (rectangle)
+        # --- Properly expand AABB to 8-coordinate quad (rectangle) ---
         box_lines = []
         for li in lines:
             xmin, ymin, xmax, ymax = map(int, li["aabb"])
             quad = (xmin, ymin, xmax, ymin, xmax, ymax, xmin, ymax)
             box_lines.append(BoxLine(quad, li["text"]))
 
-
-
-
-        
+        # --- Field mapping ---
         mapping = assign_lines_to_fields(box_lines, ent)
-
-        
-        # print(f"\n📦 {stem}: loaded {len(box_lines)} OCR lines.")
-        # if len(box_lines) > 0:
-        #     print("  Example OCR line:", box_lines[0].text)
-        # if len(mapping) == 0:
-        #     print("⚠️ No field mapping found — all labels may become 'O'.")
 
         words, boxes, labels = [], [], []
 
         for li in box_lines:
             xmin, ymin, xmax, ymax = li.aabb
+
+            # 🧱 Clamp bbox values safely to [0, 1000]
+            xmin = max(0, min(xmin, 1000))
+            ymin = max(0, min(ymin, 1000))
+            xmax = max(0, min(xmax, 1000))
+            ymax = max(0, min(ymax, 1000))
+
             clean_text = " ".join(li.text.split())
             tokens = self.processor.tokenizer.tokenize(clean_text)
             if not tokens:
@@ -323,31 +327,55 @@ class ReceiptLayoutLMv3Dataset:
             for j, tok in enumerate(tokens):
                 words.append(tok)
                 boxes.append([xmin, ymin, xmax, ymax])
-                labels.append(LABEL2ID[b_label if j == 0 else i_label] if field in FIELD_TO_BI else LABEL2ID["O"])
+                if field in FIELD_TO_BI:
+                    labels.append(LABEL2ID[b_label if j == 0 else i_label])
+                else:
+                    labels.append(LABEL2ID["O"])
 
-        # (padding and encoding remain unchanged ↓)
+        # --- Sanity check for invalid labels ---
+        if any(l >= len(LABEL2ID) or l < -100 for l in labels):
+            print(f"⚠️ Invalid label index detected in {stem}, resetting to O.")
+            labels = [LABEL2ID["O"] if (l >= len(LABEL2ID) or l < -100) else l for l in labels]
+
+        # --- Pad or truncate safely ---
         pad_len = self.max_seq_len - len(words)
         if pad_len < 0:
-            words, boxes, labels = words[:self.max_seq_len], boxes[:self.max_seq_len], labels[:self.max_seq_len]
+            words = words[:self.max_seq_len]
+            boxes = boxes[:self.max_seq_len]
+            labels = labels[:self.max_seq_len]
         else:
             boxes += [[0, 0, 0, 0]] * pad_len
             words += ["[PAD]"] * pad_len
             labels += [-100] * pad_len
 
-        encoded = self.processor(
-            image,
-            words,
-            boxes=boxes,
-            word_labels=labels,
-            truncation=True,
-            padding="max_length",
-            max_length=self.max_seq_len,
-            return_tensors="pt",
-        )
+        # --- Encode via processor ---
+        try:
+            encoded = self.processor(
+                image,
+                words,
+                boxes=boxes,
+                word_labels=labels,
+                truncation=True,
+                padding="max_length",
+                max_length=self.max_seq_len,
+                return_tensors="pt",
+            )
+        except Exception as e:
+            print(f"❌ Encoding failed for {stem}: {e}")
+            # Skip bad sample
+            return self.__getitem__((idx + 1) % len(self.stems))
 
         item = {k: v.squeeze(0) for k, v in encoded.items()}
         item["id"] = stem
+
+        # --- Save to cache ---
+        try:
+            torch.save(item, cache_path)
+        except Exception:
+            print(f"⚠️ Could not cache {stem}.")
+
         return item
+
 
 
 
