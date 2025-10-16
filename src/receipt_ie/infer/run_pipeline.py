@@ -15,6 +15,9 @@ Enhanced features:
 ✅ Auto processor/model fallback
 ✅ Deterministic output (temperature=0)
 """
+os.environ["HF_HOME"] = "/kaggle/temp/hf_home"
+os.environ["HF_DATASETS_CACHE"] = "/kaggle/temp/hf_cache"
+os.environ["TRANSFORMERS_CACHE"] = "/kaggle/temp/hf_models"
 
 import os
 import re
