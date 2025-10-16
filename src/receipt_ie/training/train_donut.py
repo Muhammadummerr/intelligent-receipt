@@ -232,7 +232,8 @@ def main():
         lr_scheduler_type="cosine",
         max_grad_norm=0.5,
         dataloader_pin_memory=True,
-        dataloader_num_workers=2,      # light workers to avoid RAM spikes
+        dataloader_num_workers=0,      # light workers to avoid RAM spikes
+        max_split_size_mb=32,
     )
 
     # 7) Trainer (simple: call model.forward)
