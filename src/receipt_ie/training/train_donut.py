@@ -86,7 +86,7 @@ def build_donut_json(data_root, split="train", output_json="train.json"):
             "address": entities.get("address", ""),
             "total": entities.get("total", ""),
         }
-        gt_str = "<s_receipt>" + json.dumps(gt_json, ensure_ascii=False)
+        gt_str = "<s_receipt>" + json.dumps(gt_json, ensure_ascii=False) + "</s>"
         donut_samples.append({"image": os.path.join(img_dir, fname), "ground_truth": gt_str})
 
     with open(output_json, "w", encoding="utf-8") as f:
@@ -157,7 +157,7 @@ def donut_collate_fn(batch):
 # -------------------------------
 def main():
     data_root = "/kaggle/input/receipt-dataset"
-    model_id = "Bennet1996/donut-small"  # ✅ small, public Donut
+    model_id = "naver-clova-ix/donut-base"# ✅ small, public Donut
     out_dir = "/kaggle/temp/outputs_donut"  # ✅ use /kaggle/temp (more space)
     os.makedirs(out_dir, exist_ok=True)
 
@@ -194,8 +194,8 @@ def main():
     # 6️⃣ Training args
     training_args = Seq2SeqTrainingArguments(
         output_dir=out_dir,
-        num_train_epochs=5,
-        learning_rate=5e-5,
+        num_train_epochs=15,
+        learning_rate=1e-5,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=4,
