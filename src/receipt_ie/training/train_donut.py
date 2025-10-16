@@ -104,17 +104,26 @@ def make_preprocess_fn(processor):
         pixel_values, labels = [], []
         for image_path, gt in zip(examples["image"], examples["ground_truth"]):
             image = Image.open(image_path).convert("RGB")
-            # ↓ Resize to smaller resolution for VRAM saving
             image = image.resize((384, 384))
 
+            # ✅ Ensure tensor type directly
             pv = processor(image, return_tensors="pt").pixel_values.squeeze(0)
             pixel_values.append(pv)
 
-            ids = processor.tokenizer(gt, add_special_tokens=False, return_tensors="pt").input_ids.squeeze(0)
+            # ✅ Convert to tensor immediately
+            ids = processor.tokenizer(
+                gt, add_special_tokens=False, return_tensors="pt"
+            ).input_ids.squeeze(0)
+
             if eos_id is not None:
-                ids = torch.cat([ids, torch.tensor([eos_id])])
+                ids = torch.cat([ids, torch.tensor([eos_id], dtype=torch.long)])
             labels.append(ids)
-        return {"pixel_values": pixel_values, "labels": labels}
+
+        # ✅ Return tensors instead of lists
+        return {
+            "pixel_values": [torch.as_tensor(p) for p in pixel_values],
+            "labels": [torch.as_tensor(l, dtype=torch.long) for l in labels],
+        }
 
     return _fn
 
@@ -123,7 +132,8 @@ def make_preprocess_fn(processor):
 # Step 3: Collator (manual padding)
 # -------------------------------
 def donut_collate_fn(batch):
-    pixel_values = torch.stack([b["pixel_values"] for b in batch])
+    # ✅ Each item["pixel_values"] is now a tensor
+    pixel_values = torch.stack([torch.as_tensor(b["pixel_values"]) for b in batch])
 
     lengths = [x["labels"].size(0) for x in batch]
     max_len = max(lengths)
@@ -164,7 +174,15 @@ def main():
 
     # 4️⃣ Preprocess
     preprocess_fn = make_preprocess_fn(processor)
-    dataset = dataset.map(preprocess_fn, batched=True, remove_columns=dataset["train"].column_names)
+    dataset = dataset.map(
+        preprocess_fn,
+        batched=True,
+        remove_columns=dataset["train"].column_names,
+    )
+
+    # ✅ Convert all columns to torch tensors (fixes collate issue)
+    dataset.set_format(type="torch", columns=["pixel_values", "labels"])
+
 
     # 5️⃣ Memory optimizations
     model.gradient_checkpointing_enable()
