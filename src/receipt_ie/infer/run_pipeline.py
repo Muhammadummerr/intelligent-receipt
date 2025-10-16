@@ -15,9 +15,7 @@ Enhanced features:
 ✅ Auto processor/model fallback
 ✅ Deterministic output (temperature=0)
 """
-os.environ["HF_HOME"] = "/kaggle/temp/hf_home"
-os.environ["HF_DATASETS_CACHE"] = "/kaggle/temp/hf_cache"
-os.environ["TRANSFORMERS_CACHE"] = "/kaggle/temp/hf_models"
+
 
 import os
 import re
@@ -30,7 +28,9 @@ from ..utils.postproc import clean_company, soft_addr_norm, norm_date, soft_tota
 # from .predict_layoutlmv3 import run_inference_single
 from .predict_donut import run_inference_single
 
-
+os.environ["HF_HOME"] = "/kaggle/temp/hf_home"
+os.environ["HF_DATASETS_CACHE"] = "/kaggle/temp/hf_cache"
+os.environ["TRANSFORMERS_CACHE"] = "/kaggle/temp/hf_models"
 
 # ------------------------------ Safe JSON Loader ------------------------------ #
 def safe_json_loads(text: str) -> Dict[str, Any]:
