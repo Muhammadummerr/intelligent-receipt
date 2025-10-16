@@ -88,7 +88,7 @@ def make_preprocess_fn(processor):
     def fn(batch):
         pix, lbl = [], []
         for img_path, gt in zip(batch["image"], batch["ground_truth"]):
-            img = Image.open(img_path).convert("RGB").resize((256, 256))
+            img = Image.open(img_path).convert("RGB").resize((224, 224))
             pv = processor(img, return_tensors="pt").pixel_values.squeeze(0)
             ids = processor.tokenizer(gt, add_special_tokens=False,
                                       return_tensors="pt").input_ids.squeeze(0)
@@ -145,6 +145,8 @@ def main():
     ds.set_format(type="torch", columns=["pixel_values", "labels"])
 
     model.gradient_checkpointing_enable()
+    model.enable_input_require_grads()
+    torch.cuda.empty_cache()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
@@ -154,7 +156,7 @@ def main():
         learning_rate=2e-4,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=8,
+        gradient_accumulation_steps=4,
         predict_with_generate=True,
         generation_max_length=128,
         fp16=True,
