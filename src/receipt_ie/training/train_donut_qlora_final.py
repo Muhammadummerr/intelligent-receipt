@@ -40,7 +40,7 @@ def normalize_box(box, width, height):
 def load_ocr_file(path):
     """Read OCR text lines and bounding boxes from txt file."""
     ocr_data = []
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8",errors="ignore") as f:
         for line in f:
             parts = line.strip().split(",")
             if len(parts) < 9:  # invalid line
