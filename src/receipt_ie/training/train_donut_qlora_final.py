@@ -68,14 +68,26 @@ def load_entity_file(path: str) -> Dict[str, Any]:
 
 
 def build_donut_json(data_root: str, split: str, out_json: str) -> str:
-    """Create JSONL manifest with <s_receipt>{...}</s> formatted targets."""
+    """
+    Create JSONL manifest with robust receipt-format targets.
+    Expected entity files:
+    {
+        "company": "ONE ONE THREE SEAFOOD RESTAURANT SDN BHD",
+        "date": "30-05-2018",
+        "address": "NO.1, TAMAN SRI DENGKIL, JALAN AIR HITAM 43800 DENGKIL, SELANGOR.",
+        "total": "87.45"
+    }
+    """
     img_dir = os.path.join(data_root, split, "img")
     ent_dir = os.path.join(data_root, split, "entities")
     samples = []
+
     for fname in tqdm(sorted(os.listdir(img_dir)), desc=f"scan-{split}"):
         stem, ext = os.path.splitext(fname)
         if ext.lower() not in [".jpg", ".jpeg", ".png"]:
             continue
+
+        # Try both JSON and TXT
         ent_path = None
         for e in (".json", ".txt"):
             p = os.path.join(ent_dir, stem + e)
@@ -84,20 +96,36 @@ def build_donut_json(data_root: str, split: str, out_json: str) -> str:
                 break
         if not ent_path:
             continue
+
         ent = load_entity_file(ent_path)
+
+        # Normalize + tolerate missing fields
+        company = str(ent.get("company", "")).strip()
+        address = str(ent.get("address", "")).strip()
+        total = str(ent.get("total", "")).strip()
+        date = str(ent.get("date", "")).strip()
+
+        # ✅ Keep original date string (dash, slash, dot, etc.) — model learns to generalize
         gt = {
-            "company": ent.get("company", ""),
-            "date": ent.get("date", ""),
-            "address": ent.get("address", ""),
-            "total": ent.get("total", ""),
+            "company": company,
+            "date": date,
+            "address": address,
+            "total": total,
         }
+
         s = "<s_receipt>" + json.dumps(gt, ensure_ascii=False) + "</s>"
-        samples.append({"image": os.path.join(img_dir, fname), "ground_truth": s})
+        samples.append({
+            "image": os.path.join(img_dir, fname),
+            "ground_truth": s
+        })
+
     with open(out_json, "w", encoding="utf-8") as f:
         for s in samples:
             f.write(json.dumps(s, ensure_ascii=False) + "\n")
+
     print(f"✅ Saved {len(samples)} samples → {out_json}")
     return out_json
+
 
 
 def donut_collate_fn(batch):
@@ -195,7 +223,7 @@ def main():
     # === Training Config ===
     args = Seq2SeqTrainingArguments(
         output_dir=out_dir,
-        num_train_epochs=22,
+        num_train_epochs=60,
         learning_rate=5e-5,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
@@ -212,6 +240,8 @@ def main():
         max_grad_norm=0.5,
         weight_decay=0.01,
         dataloader_pin_memory=True,
+        remove_unused_columns=False,
+
     )
 
     pad_token_id = processor.tokenizer.pad_token_id
