@@ -27,6 +27,8 @@ from transformers import LayoutLMv3Processor, LayoutLMv3ForTokenClassification
 from PIL import Image
 
 # === Imports from your repo ===
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
+
 from src.receipt_ie.data.dataset_infer import ReceiptInferenceDataset
 from src.receipt_ie.utils.decode import group_bio
 from src.receipt_ie.utils.postproc import (
