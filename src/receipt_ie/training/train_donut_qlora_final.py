@@ -3,49 +3,46 @@ train_donut_lora_final.py
 --------------------------------
 Kaggle-safe LoRA fine-tuning for Donut (Bennet1996/donut-small).
 
-Key improvements vs. previous version:
-- Use 512x512 images (small text becomes readable).
-- Use processor(images=...) for correct normalization.
-- Predict with generate + CER metric during validation.
-- Saner hyperparams to avoid overfit on small receipt sets.
-- Keep LoRA on decoder only; freeze vision encoder.
+✅ Optimized for structured receipt extraction:
+   Outputs: {"company": "...", "date": "...", "address": "...", "total": "..."}
 
-I/O expectation (dataset root):
+✅ Fixes from your last training:
+ - Ensures <s_receipt> and </s> exist in tokenizer before training.
+ - Proper LoRA applied to decoder submodules only.
+ - Clean JSON manifest builder (supports .json or .txt entity files).
+ - More stable LR & warmup schedule for small datasets.
+ - Uses CER metric on generated text.
+
+Expected dataset layout:
 root/
   train/
     img/*.jpg|png
-    entities/*.txt|json    # {company,date,address,total}
+    entities/*.txt|json    # each with fields {company,date,address,total}
   test/
     img/*.jpg|png
     entities/*.txt|json
 """
 
-# -------------------- Hard memory/parallel guards (must be first) --------------------
+# -------------------- Environment Guards --------------------
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-os.environ["NCCL_P2P_DISABLE"] = "1"
-os.environ["NCCL_IB_DISABLE"] = "1"
-os.environ["NCCL_SHM_DISABLE"] = "1"
-os.environ["NCCL_DEBUG"] = "WARN"
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:64"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["WANDB_DISABLED"] = "true"
 os.environ["HF_DATASETS_DISABLE_CACHE"] = "0"
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:64"
 
-import json
-import gc
-import numpy as np
-from typing import Dict, Any, List
-
-import torch
+# -------------------- Imports --------------------
+import json, gc, torch, numpy as np
 from PIL import Image
+from tqdm import tqdm
+from typing import Dict, Any, List
 from datasets import load_dataset
 from transformers import (
     DonutProcessor,
     VisionEncoderDecoderModel,
-    Seq2SeqTrainingArguments,
     Seq2SeqTrainer,
+    Seq2SeqTrainingArguments,
     set_seed,
 )
 from peft import LoraConfig, get_peft_model, TaskType
@@ -53,7 +50,7 @@ from peft import LoraConfig, get_peft_model, TaskType
 
 # -------------------- Utilities --------------------
 def load_entity_file(path: str) -> Dict[str, Any]:
-    """Tolerant loader for .json or plain 'k: v' .txt"""
+    """Load entity JSON or text files."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             txt = f.read().strip()
@@ -71,10 +68,7 @@ def load_entity_file(path: str) -> Dict[str, Any]:
 
 
 def build_donut_json(data_root: str, split: str, out_json: str) -> str:
-    """Create JSONL manifest: {image: path, ground_truth: "<s_receipt>{...}</s>"}"""
-    import os
-    from tqdm import tqdm
-
+    """Create JSONL manifest with <s_receipt>{...}</s> formatted targets."""
     img_dir = os.path.join(data_root, split, "img")
     ent_dir = os.path.join(data_root, split, "entities")
     samples = []
@@ -99,7 +93,6 @@ def build_donut_json(data_root: str, split: str, out_json: str) -> str:
         }
         s = "<s_receipt>" + json.dumps(gt, ensure_ascii=False) + "</s>"
         samples.append({"image": os.path.join(img_dir, fname), "ground_truth": s})
-
     with open(out_json, "w", encoding="utf-8") as f:
         for s in samples:
             f.write(json.dumps(s, ensure_ascii=False) + "\n")
@@ -108,7 +101,7 @@ def build_donut_json(data_root: str, split: str, out_json: str) -> str:
 
 
 def donut_collate_fn(batch):
-    """Pads labels to max length; pixel_values already tensors."""
+    """Collate function with label padding."""
     pixel_values = torch.stack([b["pixel_values"] for b in batch])
     lengths = [b["labels"].size(0) for b in batch]
     max_len = max(lengths)
@@ -120,21 +113,15 @@ def donut_collate_fn(batch):
 
 
 def levenshtein(a: str, b: str) -> int:
-    """Simple DP edit distance to avoid external deps."""
-    if a == b:
-        return 0
-    if len(a) == 0:
-        return len(b)
-    if len(b) == 0:
-        return len(a)
+    """Simple Levenshtein distance."""
+    if a == b: return 0
+    if len(a) == 0: return len(b)
+    if len(b) == 0: return len(a)
     prev = list(range(len(b) + 1))
     for i, ca in enumerate(a, 1):
         cur = [i]
         for j, cb in enumerate(b, 1):
-            ins = cur[j - 1] + 1
-            delete = prev[j] + 1
-            replace = prev[j - 1] + (ca != cb)
-            cur.append(min(ins, delete, replace))
+            cur.append(min(cur[-1] + 1, prev[j] + 1, prev[j - 1] + (ca != cb)))
         prev = cur
     return prev[-1]
 
@@ -144,49 +131,38 @@ def main():
     set_seed(42)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # --- Paths (adjust for your Kaggle dataset mount) ---
-    data_root = "/kaggle/input/receipt-dataset"   # <-- change if needed
+    # === PATHS ===
+    data_root = "/kaggle/input/receipt-dataset"   # Change if needed
     out_dir = "/kaggle/temp/outputs_donut"
     base_id = "Bennet1996/donut-small"
     os.makedirs(out_dir, exist_ok=True)
 
-    # 1) Build manifests
+    # === Build Manifest Files ===
     train_json = build_donut_json(data_root, "train", os.path.join(out_dir, "train.json"))
     val_json   = build_donut_json(data_root, "test",  os.path.join(out_dir, "val.json"))
 
-    # 2) Load datasets
-    dataset = load_dataset(
-        "json",
-        data_files={"train": train_json, "validation": val_json},
-        cache_dir="/kaggle/temp/hf_cache"
-    )
+    dataset = load_dataset("json", data_files={"train": train_json, "validation": val_json})
 
-    # 3) Processor + model
+    # === Load Processor + Model ===
     processor = DonutProcessor.from_pretrained(base_id)
     model = VisionEncoderDecoderModel.from_pretrained(base_id)
 
-    # Add task-specific specials
-    specials = {"<s_receipt>", "</s>"}
-    if not set(processor.tokenizer.additional_special_tokens or []).issuperset(specials):
-        processor.tokenizer.add_special_tokens({"additional_special_tokens": list(specials)})
+    # Add task tokens
+    specials = ["<s_receipt>", "</s>"]
+    added = processor.tokenizer.add_tokens(specials)
+    if added > 0:
         model.decoder.resize_token_embeddings(len(processor.tokenizer))
+        print(f"✅ Added {added} special tokens for <s_receipt> task.")
 
-    # Config
-    model.config.max_length = 256
     processor.tokenizer.pad_token = processor.tokenizer.eos_token
     model.config.pad_token_id = processor.tokenizer.pad_token_id
-    model.config.decoder_start_token_id = (
-        processor.tokenizer.bos_token_id or processor.tokenizer.pad_token_id
-    )
+    model.config.decoder_start_token_id = processor.tokenizer.convert_tokens_to_ids("<s_receipt>")
     model.config.eos_token_id = processor.tokenizer.eos_token_id
+    model.config.max_length = 256
     model.config.use_cache = False
     model.decoder.config.use_cache = False
-    try:
-        model.gradient_checkpointing_disable()
-    except Exception:
-        pass
 
-    # 4) LoRA on decoder
+    # === LoRA only on decoder ===
     lora_cfg = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=16, lora_alpha=32, lora_dropout=0.05,
@@ -199,93 +175,61 @@ def main():
     for p in model.encoder.parameters():
         p.requires_grad = False
 
-    # 5) Transform (on-the-fly)
+    # === Dataset Transform ===
     IMG_SIZE = 512
     eos_id = processor.tokenizer.eos_token_id
 
     def transform(example):
-        def process_one(img_path, gt_text):
-            image = Image.open(img_path).convert("RGB").resize((IMG_SIZE, IMG_SIZE), Image.BICUBIC)
-            enc = processor(images=image, return_tensors="pt")   # proper normalization
-            pv = enc.pixel_values.squeeze(0)
-
-            ids = processor.tokenizer(
-                gt_text,
-                add_special_tokens=False,
-                return_tensors="pt",
-                truncation=True,
-                max_length=256
-            ).input_ids.squeeze(0)
-            if eos_id is not None:
-                ids = torch.cat([ids, torch.tensor([eos_id], dtype=torch.long)])
-            return pv, ids
-
-        if isinstance(example["image"], list):
-            pixel_values, labels = [], []
-            for img, gt in zip(example["image"], example["ground_truth"]):
-                pv, ids = process_one(img, gt)
-                pixel_values.append(pv)
-                labels.append(ids)
-            return {"pixel_values": pixel_values, "labels": labels}
-        else:
-            pv, ids = process_one(example["image"], example["ground_truth"])
-            return {"pixel_values": pv, "labels": ids}
+        image = Image.open(example["image"]).convert("RGB").resize((IMG_SIZE, IMG_SIZE))
+        pixel_values = processor(images=image, return_tensors="pt").pixel_values.squeeze(0)
+        input_ids = processor.tokenizer(
+            example["ground_truth"], add_special_tokens=False, return_tensors="pt"
+        ).input_ids.squeeze(0)
+        if eos_id is not None:
+            input_ids = torch.cat([input_ids, torch.tensor([eos_id])])
+        return {"pixel_values": pixel_values, "labels": input_ids}
 
     dataset = dataset.with_transform(transform)
-
     gc.collect()
 
-    # 6) Training args — tuned for small datasets
+    # === Training Config ===
     args = Seq2SeqTrainingArguments(
         output_dir=out_dir,
         num_train_epochs=22,
         learning_rate=5e-5,
         per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,
         gradient_accumulation_steps=4,
         predict_with_generate=True,
         generation_max_length=256,
-        fp16=True,  # T4 friendly
-        bf16=False,
+        fp16=True,
         save_strategy="epoch",
         evaluation_strategy="epoch",
         logging_dir=os.path.join(out_dir, "logs"),
-        logging_steps=50,
         save_total_limit=2,
-        remove_unused_columns=False,
         report_to=[],
-        weight_decay=0.01,
         warmup_ratio=0.06,
         lr_scheduler_type="cosine",
         max_grad_norm=0.5,
+        weight_decay=0.01,
         dataloader_pin_memory=True,
-        dataloader_num_workers=0,
     )
 
-    # 7) Metrics (CER on decoded strings)
     pad_token_id = processor.tokenizer.pad_token_id
-
-    def _decode_label_batch(y: np.ndarray) -> List[str]:
-        y = np.where(y != -100, y, pad_token_id)
-        return processor.batch_decode(y, skip_special_tokens=True)
 
     def compute_metrics(eval_preds):
         preds, labels = eval_preds
-        pred_str = processor.batch_decode(preds, skip_special_tokens=True)
-        label_str = _decode_label_batch(labels)
-        # CER (character error rate)
-        cers = []
-        for p, l in zip(pred_str, label_str):
-            l = l.strip()
-            p = p.strip()
-            if len(l) == 0:
-                continue
-            dist = levenshtein(p, l)
-            cers.append(dist / max(1, len(l)))
-        cer = float(np.mean(cers)) if cers else 0.0
-        return {"cer": cer}
+        preds_str = processor.batch_decode(preds, skip_special_tokens=True)
+        labels_str = [
+            processor.decode(l, skip_special_tokens=True)
+            for l in np.where(labels != -100, labels, pad_token_id)
+        ]
+        cers = [
+            levenshtein(p.strip(), l.strip()) / max(1, len(l.strip()))
+            for p, l in zip(preds_str, labels_str) if l.strip()
+        ]
+        return {"cer": float(np.mean(cers))}
 
-    # 8) Trainer
+    # === Custom Trainer ===
     class DonutTrainer(Seq2SeqTrainer):
         def compute_loss(self, model, inputs, return_outputs=False):
             outputs = model(pixel_values=inputs["pixel_values"], labels=inputs["labels"])
@@ -301,27 +245,23 @@ def main():
         compute_metrics=compute_metrics,
     )
 
-    print("🚀 Training…")
+    print("🚀 Training started...")
     trainer.train()
-    print("✅ Training done.")
+    print("✅ Training complete.")
 
-    # 9) Save base wrapper + processor
+    # === Save Outputs ===
     final_base = os.path.join(out_dir, "final_model_lora")
-    os.makedirs(final_base, exist_ok=True)
+    adapter_dir = os.path.join(out_dir, "final_lora_adapter")
+
     model.save_pretrained(final_base)
     processor.save_pretrained(final_base)
 
-    # 10) Save LoRA adapter separately
-    adapter_dir = os.path.join(out_dir, "final_lora_adapter")
-    os.makedirs(adapter_dir, exist_ok=True)
-    model.decoder.save_pretrained(adapter_dir)  # PEFT saves adapter_config + adapter_model
+    model.decoder.save_pretrained(adapter_dir)
     processor.save_pretrained(adapter_dir)
 
-    print(f"✅ Saved adapter to: {adapter_dir}")
-    print(f"🏁 All artifacts in: {out_dir}")
+    print(f"✅ Final model saved: {final_base}")
+    print(f"✅ Adapter saved: {adapter_dir}")
 
 
 if __name__ == "__main__":
-    if torch.cuda.is_available():
-        torch.cuda.set_device(0)
     main()
