@@ -162,13 +162,17 @@
 
 
 """
-layoutlmv3_receipt_finetune_augmented_safe.py
----------------------------------------------
-Fine-tunes LayoutLMv3 on receipt OCR data with Albumentations augmentation.
-Includes box sanitization to avoid y_max <= y_min errors.
+layoutlmv3_receipt_finetune_augmented_smartlabels.py
+----------------------------------------------------
+Fine-tunes LayoutLMv3 on receipt OCR data.
+✅ Includes:
+ - Safe augmentations (Albumentations + box sanitization)
+ - Smart token-level entity matching (Fix #1)
+ - Early stopping, best model saving
+ - Clean, Kaggle-friendly configuration
 """
 
-import os, json, random, torch
+import os, json, random, re, torch
 import albumentations as A
 import numpy as np
 from datasets import Dataset
@@ -220,7 +224,6 @@ augment = A.Compose([
 # HELPERS
 # ==========================
 def normalize_box(box, width, height):
-    """Convert absolute box to [0,1000] range for LayoutLMv3."""
     return [
         int(1000 * (box[0] / width)),
         int(1000 * (box[1] / height)),
@@ -229,7 +232,6 @@ def normalize_box(box, width, height):
     ]
 
 def sanitize_box(box, W, H):
-    """Ensure box has positive area and stays inside image bounds."""
     xmin, ymin, xmax, ymax = box
     if xmax <= xmin:
         xmax = xmin + 1
@@ -265,6 +267,16 @@ def load_entities_txt(path):
     except Exception:
         return {"company": "", "date": "", "address": "", "total": ""}
 
+def text_match(token, value):
+    """Robust match: handles partial tokens, punctuation, etc."""
+    token = token.lower().strip()
+    value = value.lower().strip()
+    if not token or not value:
+        return False
+    # split both sides on punctuation/spaces
+    parts = re.split(r"[\s,./:\-]", value)
+    return token in parts or token in value
+
 def apply_augmentation(image, ocr_data):
     """Apply augmentation while maintaining valid boxes."""
     if random.random() > 0.5:
@@ -275,8 +287,7 @@ def apply_augmentation(image, ocr_data):
             image_aug = Image.fromarray(aug["image"])
             ocr_aug = list(zip(aug["texts"], [sanitize_box(b, *image.size) for b in aug["bboxes"]]))
             return image_aug, ocr_aug
-        except Exception as e:
-            # Fallback if Albumentations fails
+        except Exception:
             return image, ocr_data
     return image, ocr_data
 
@@ -296,7 +307,7 @@ def prepare_example(img_path, ent_path, ocr_path):
         box_norm = normalize_box(box, W, H)
         label = "O"
         for key, val in entities.items():
-            if val and text.lower() in val.lower():
+            if text_match(text, val):
                 label = f"B-{key.upper()}" if label == "O" else f"I-{key.upper()}"
         words.append(text)
         boxes.append(box_norm)
@@ -352,7 +363,7 @@ model = LayoutLMv3ForTokenClassification.from_pretrained(
 args = TrainingArguments(
     output_dir=output_dir,
     learning_rate=2e-5,
-    num_train_epochs=15,
+    num_train_epochs=20,
     per_device_train_batch_size=2,
     per_device_eval_batch_size=2,
     gradient_accumulation_steps=2,
@@ -375,7 +386,7 @@ trainer = Trainer(
     train_dataset=train_ds,
     eval_dataset=val_ds,
     tokenizer=processor,
-    callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
+    callbacks=[EarlyStoppingCallback(early_stopping_patience=5)],
 )
 
 # ==========================
@@ -384,4 +395,4 @@ trainer = Trainer(
 trainer.train()
 trainer.save_model(os.path.join(output_dir, "final_model"))
 processor.save_pretrained(os.path.join(output_dir, "final_model"))
-print("✅ LayoutLMv3 fine-tuning complete (safe augmentation enabled).")
+print("✅ LayoutLMv3 fine-tuning complete (smart entity labeling enabled).")
