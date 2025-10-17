@@ -208,14 +208,30 @@ def main():
     eos_id = processor.tokenizer.eos_token_id
 
     def transform(example):
-        image = Image.open(example["image"]).convert("RGB").resize((IMG_SIZE, IMG_SIZE))
-        pixel_values = processor(images=image, return_tensors="pt").pixel_values.squeeze(0)
-        input_ids = processor.tokenizer(
-            example["ground_truth"], add_special_tokens=False, return_tensors="pt"
-        ).input_ids.squeeze(0)
-        if eos_id is not None:
-            input_ids = torch.cat([input_ids, torch.tensor([eos_id])])
-        return {"pixel_values": pixel_values, "labels": input_ids}
+        def process_one(img_path, gt_text):
+            image = Image.open(img_path).convert("RGB").resize((IMG_SIZE, IMG_SIZE))
+            pixel_values = processor(images=image, return_tensors="pt").pixel_values.squeeze(0)
+            input_ids = processor.tokenizer(
+                gt_text,
+                add_special_tokens=False,
+                return_tensors="pt",
+                truncation=True,
+                max_length=256,
+            ).input_ids.squeeze(0)
+            if eos_id is not None:
+                input_ids = torch.cat([input_ids, torch.tensor([eos_id])])
+            return {"pixel_values": pixel_values, "labels": input_ids}
+
+        # ✅ Handle both batched and single examples
+        if isinstance(example["image"], list):
+            out = [process_one(img, gt) for img, gt in zip(example["image"], example["ground_truth"])]
+            return {
+                "pixel_values": torch.stack([x["pixel_values"] for x in out]),
+                "labels": [x["labels"] for x in out],
+            }
+        else:
+            return process_one(example["image"], example["ground_truth"])
+
 
     dataset = dataset.with_transform(transform)
     gc.collect()
