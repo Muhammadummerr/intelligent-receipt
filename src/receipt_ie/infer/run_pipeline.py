@@ -25,7 +25,7 @@ import torch
 from typing import Dict, Any
 from transformers import LayoutLMv3Processor, LayoutLMv3ForTokenClassification
 from PIL import Image
-
+import sys
 # === Imports from your repo ===
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
