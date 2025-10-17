@@ -100,7 +100,9 @@ args = TrainingArguments(
     fp16=True,
     save_total_limit=2,
     logging_steps=25,
+    remove_unused_columns=False,  # 👈 Fix here
 )
+
 
 trainer = Trainer(
     model=model,
