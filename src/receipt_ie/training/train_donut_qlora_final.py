@@ -162,11 +162,10 @@
 
 
 """
-layoutlmv3_receipt_finetune_augmented.py
-----------------------------------------
-Fine-tunes LayoutLMv3 for receipt entity extraction:
-(company, date, address, total)
-with automatic Albumentations-based OCR-preserving augmentation.
+layoutlmv3_receipt_finetune_augmented_safe.py
+---------------------------------------------
+Fine-tunes LayoutLMv3 on receipt OCR data with Albumentations augmentation.
+Includes box sanitization to avoid y_max <= y_min errors.
 """
 
 import os, json, random, torch
@@ -184,14 +183,14 @@ from PIL import Image
 from tqdm import tqdm
 
 # ==========================
-# 📁 PATHS
+# PATHS
 # ==========================
 data_root = "/kaggle/input/receipt-dataset"
 output_dir = "/kaggle/temp/outputs_layoutlmv3"
 os.makedirs(output_dir, exist_ok=True)
 
 # ==========================
-# 🏷️ LABEL SETUP
+# LABELS
 # ==========================
 labels = [
     "O",
@@ -204,23 +203,21 @@ label2id = {l: i for i, l in enumerate(labels)}
 id2label = {i: l for l, i in label2id.items()}
 
 # ==========================
-# 🤖 PROCESSOR
+# PROCESSOR
 # ==========================
-processor = LayoutLMv3Processor.from_pretrained(
-    "microsoft/layoutlmv3-base", apply_ocr=False
-)
+processor = LayoutLMv3Processor.from_pretrained("microsoft/layoutlmv3-base", apply_ocr=False)
 
 # ==========================
-# 🧩 AUGMENTATION PIPELINE
+# AUGMENTATION PIPELINE
 # ==========================
 augment = A.Compose([
-    A.ShiftScaleRotate(shift_limit=0.02, scale_limit=0.05, rotate_limit=3, p=0.6),
+    A.Affine(scale=(0.95, 1.05), translate_percent=(0.02, 0.02), rotate=(-3, 3), p=0.6),
     A.RandomBrightnessContrast(p=0.4),
     A.GaussNoise(p=0.3),
-], bbox_params=A.BboxParams(format="pascal_voc", label_fields=["texts"]))
+], bbox_params=A.BboxParams(format="pascal_voc", label_fields=["texts"], min_visibility=0.2))
 
 # ==========================
-# 🧠 HELPERS
+# HELPERS
 # ==========================
 def normalize_box(box, width, height):
     """Convert absolute box to [0,1000] range for LayoutLMv3."""
@@ -231,8 +228,18 @@ def normalize_box(box, width, height):
         int(1000 * (box[3] / height)),
     ]
 
+def sanitize_box(box, W, H):
+    """Ensure box has positive area and stays inside image bounds."""
+    xmin, ymin, xmax, ymax = box
+    if xmax <= xmin:
+        xmax = xmin + 1
+    if ymax <= ymin:
+        ymax = ymin + 1
+    xmin, ymin = max(0, xmin), max(0, ymin)
+    xmax, ymax = min(W - 1, xmax), min(H - 1, ymax)
+    return [xmin, ymin, xmax, ymax]
+
 def load_ocr_file(path):
-    """Read OCR boxes and text."""
     data = []
     with open(path, encoding="utf-8", errors="ignore") as f:
         for line in f:
@@ -252,7 +259,6 @@ def load_ocr_file(path):
     return data
 
 def load_entities_txt(path):
-    """Each .txt contains JSON of fields."""
     try:
         with open(path, encoding="utf-8") as f:
             return json.loads(f.read().strip())
@@ -260,15 +266,19 @@ def load_entities_txt(path):
         return {"company": "", "date": "", "address": "", "total": ""}
 
 def apply_augmentation(image, ocr_data):
-    """Apply Albumentations to image and its OCR boxes."""
+    """Apply augmentation while maintaining valid boxes."""
     if random.random() > 0.5:
         texts = [t for t, _ in ocr_data]
-        boxes = [b for _, b in ocr_data]
-        aug = augment(image=np.array(image), bboxes=boxes, texts=texts)
-        image_aug = Image.fromarray(aug["image"])
-        ocr_aug = list(zip(aug["texts"], aug["bboxes"]))
-        return image_aug, ocr_aug
-    return image, ocr_data  # no change
+        boxes = [sanitize_box(b, *image.size) for _, b in ocr_data]
+        try:
+            aug = augment(image=np.array(image), bboxes=boxes, texts=texts)
+            image_aug = Image.fromarray(aug["image"])
+            ocr_aug = list(zip(aug["texts"], [sanitize_box(b, *image.size) for b in aug["bboxes"]]))
+            return image_aug, ocr_aug
+        except Exception as e:
+            # Fallback if Albumentations fails
+            return image, ocr_data
+    return image, ocr_data
 
 def prepare_example(img_path, ent_path, ocr_path):
     image = Image.open(img_path).convert("RGB")
@@ -276,13 +286,13 @@ def prepare_example(img_path, ent_path, ocr_path):
     ocr_data = load_ocr_file(ocr_path)
     entities = load_entities_txt(ent_path)
 
-    # Apply augmentation sometimes
     image, ocr_data = apply_augmentation(image, ocr_data)
     W, H = image.size
 
     words, boxes, label_ids = [], [], []
 
     for text, box in ocr_data:
+        box = sanitize_box(box, W, H)
         box_norm = normalize_box(box, W, H)
         label = "O"
         for key, val in entities.items():
@@ -308,14 +318,13 @@ def prepare_example(img_path, ent_path, ocr_path):
     return encoding
 
 # ==========================
-# 📦 DATASET PREP
+# DATASET BUILDING
 # ==========================
 samples = []
 for split in ["train", "test"]:
     img_dir = os.path.join(data_root, split, "img")
     ent_dir = os.path.join(data_root, split, "entities")
     ocr_dir = os.path.join(data_root, split, "box")
-
     for fname in tqdm(os.listdir(img_dir), desc=f"scan-{split}"):
         stem, _ = os.path.splitext(fname)
         img_path = os.path.join(img_dir, fname)
@@ -326,13 +335,12 @@ for split in ["train", "test"]:
         samples.append(prepare_example(img_path, ent_path, ocr_path))
 
 print(f"✅ Loaded {len(samples)} samples total.")
-
 dataset = Dataset.from_list(samples)
 split_ds = dataset.train_test_split(test_size=0.2, seed=42)
 train_ds, val_ds = split_ds["train"], split_ds["test"]
 
 # ==========================
-# 🧮 MODEL
+# MODEL & TRAINING
 # ==========================
 model = LayoutLMv3ForTokenClassification.from_pretrained(
     "microsoft/layoutlmv3-base",
@@ -341,9 +349,6 @@ model = LayoutLMv3ForTokenClassification.from_pretrained(
     label2id=label2id,
 )
 
-# ==========================
-# ⚙️ TRAINING ARGS
-# ==========================
 args = TrainingArguments(
     output_dir=output_dir,
     learning_rate=2e-5,
@@ -374,9 +379,9 @@ trainer = Trainer(
 )
 
 # ==========================
-# 🚀 TRAIN
+# TRAIN
 # ==========================
-trainer.train(resume_from_checkpoint=True if os.path.exists(os.path.join(output_dir, "checkpoint-1")) else None)
+trainer.train()
 trainer.save_model(os.path.join(output_dir, "final_model"))
 processor.save_pretrained(os.path.join(output_dir, "final_model"))
-print("✅ LayoutLMv3 fine-tuning complete with augmentation.")
+print("✅ LayoutLMv3 fine-tuning complete (safe augmentation enabled).")
