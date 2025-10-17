@@ -89,12 +89,17 @@ def prepare_example(img_path, entities_path, ocr_path):
         boxes=boxes,
         truncation=True,
         padding="max_length",
-        max_length=512
+        max_length=512,
+        return_tensors="pt"
     )
-    # pad labels
+
     labels_ = labels_[:512] + [0] * max(0, 512 - len(labels_))
-    encoding["labels"] = labels_
+
+    # Remove batch dimension
+    encoding = {k: v.squeeze(0) for k, v in encoding.items()}
+    encoding["labels"] = torch.tensor(labels_, dtype=torch.long)
     return encoding
+
 
 
 # === BUILD DATASET ===
