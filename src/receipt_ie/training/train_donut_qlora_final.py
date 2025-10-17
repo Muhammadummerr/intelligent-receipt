@@ -239,7 +239,7 @@ def main():
     # === Training Config ===
     args = Seq2SeqTrainingArguments(
         output_dir=out_dir,
-        num_train_epochs=60,
+        num_train_epochs=2,
         learning_rate=5e-5,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
