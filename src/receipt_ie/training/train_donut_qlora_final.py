@@ -1,309 +1,116 @@
-"""
-train_donut_lora_final_fixed.py
---------------------------------
-LoRA fine-tuning for Donut (Bennet1996/donut-small) on structured receipt extraction.
+# layoutlmv3_finetune_receipt.py
 
-✅ Fixes & improvements:
- - Handles both single & batched samples in transform().
- - Adds real <pad> token (avoids "attention mask not set" warning).
- - Faster eval: smaller validation batches + generation_config.
- - Robust entity handling (company, date, address, total).
- - CER metric for structured text accuracy.
- - LoRA applied only to decoder; encoder frozen.
-
-Expected dataset structure:
-root/
-  train/
-    img/*.jpg|png
-    entities/*.json|txt  # each with {company,date,address,total}
-  test/
-    img/*.jpg|png
-    entities/*.json|txt
-"""
-
-# -------------------- Environment Guards --------------------
-import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ["WANDB_DISABLED"] = "true"
-os.environ["HF_DATASETS_DISABLE_CACHE"] = "0"
-os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:64"
-
-# -------------------- Imports --------------------
-import json, gc, torch, numpy as np
+import os, json, torch
+from datasets import Dataset
+from transformers import (
+    LayoutLMv3Processor,
+    LayoutLMv3ForTokenClassification,
+    TrainingArguments,
+    Trainer,
+)
 from PIL import Image
 from tqdm import tqdm
-from typing import Dict, Any, List
-from datasets import load_dataset
-from transformers import (
-    DonutProcessor,
-    VisionEncoderDecoderModel,
-    Seq2SeqTrainer,
-    Seq2SeqTrainingArguments,
-    GenerationConfig,
-    set_seed,
-)
-from peft import LoraConfig, get_peft_model, TaskType
 
+data_root = "/kaggle/input/receipt-dataset"  # adjust path
 
-# -------------------- Utilities --------------------
-def load_entity_file(path: str) -> Dict[str, Any]:
-    """Load JSON or 'key: value' text entity file."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            txt = f.read().strip()
-            try:
-                return json.loads(txt)
-            except Exception:
-                ent = {}
-                for line in txt.splitlines():
-                    if ":" in line:
-                        k, v = line.split(":", 1)
-                        ent[k.strip().lower()] = v.strip()
-                return ent
-    except Exception:
-        return {}
+labels = ["O", "B-COMPANY", "I-COMPANY", "B-DATE", "I-DATE", "B-ADDRESS", "I-ADDRESS", "B-TOTAL", "I-TOTAL"]
+label2id = {l:i for i,l in enumerate(labels)}
+id2label = {i:l for l,i in label2id.items()}
 
+processor = LayoutLMv3Processor.from_pretrained("microsoft/layoutlmv3-base", apply_ocr=False)
 
-def build_donut_json(data_root: str, split: str, out_json: str) -> str:
-    """Create JSONL manifest for Donut training."""
+def normalize_box(box, width, height):
+    return [
+        int(1000 * (box[0] / width)),
+        int(1000 * (box[1] / height)),
+        int(1000 * (box[2] / width)),
+        int(1000 * (box[3] / height)),
+    ]
+
+def load_ocr_file(path):
+    ocr_data = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split(",")
+            if len(parts) < 9: continue
+            x1, y1, x2, y2, x3, y3, x4, y4 = map(int, parts[:8])
+            text = ",".join(parts[8:]).strip()
+            box = [min(x1, x2, x3, x4), min(y1, y2, y3, y4), max(x1, x2, x3, x4), max(y1, y2, y3, y4)]
+            ocr_data.append((text, box))
+    return ocr_data
+
+def prepare_example(img_path, entities_path, ocr_path):
+    image = Image.open(img_path).convert("RGB")
+    W, H = image.size
+    ocr_data = load_ocr_file(ocr_path)
+    with open(entities_path, encoding="utf-8") as f:
+        entities = json.load(f)
+
+    words, boxes, labels_ = [], [], []
+
+    for text, box in ocr_data:
+        box_norm = normalize_box(box, W, H)
+        label = "O"
+        for key, val in entities.items():
+            if val and text.lower() in val.lower():
+                label = f"B-{key.upper()}" if label == "O" else f"I-{key.upper()}"
+        words.append(text)
+        boxes.append(box_norm)
+        labels_.append(label2id.get(label, 0))
+
+    encoding = processor(image, words, boxes=boxes, truncation=True, padding="max_length", max_length=512)
+    encoding["labels"] = labels_ + [0]*(512 - len(labels_))
+    return encoding
+
+# --- Build Dataset ---
+samples = []
+for split in ["train", "test"]:
     img_dir = os.path.join(data_root, split, "img")
     ent_dir = os.path.join(data_root, split, "entities")
-    samples = []
-    for fname in tqdm(sorted(os.listdir(img_dir)), desc=f"scan-{split}"):
-        stem, ext = os.path.splitext(fname)
-        if ext.lower() not in [".jpg", ".jpeg", ".png"]:
-            continue
+    ocr_dir = os.path.join(data_root, split, "ocr")  # ensure folder name
+    for fname in tqdm(os.listdir(img_dir), desc=f"{split}"):
+        stem, _ = os.path.splitext(fname)
+        img_path = os.path.join(img_dir, fname)
+        ent_path = os.path.join(ent_dir, stem + ".json")
+        ocr_path = os.path.join(ocr_dir, stem + ".txt")
+        if not os.path.exists(ent_path) or not os.path.exists(ocr_path): continue
+        samples.append(prepare_example(img_path, ent_path, ocr_path))
 
-        ent_path = None
-        for e in (".json", ".txt"):
-            p = os.path.join(ent_dir, stem + e)
-            if os.path.isfile(p):
-                ent_path = p
-                break
-        if not ent_path:
-            continue
+dataset = Dataset.from_list(samples)
+train_test = dataset.train_test_split(test_size=0.2, seed=42)
+train_ds, val_ds = train_test["train"], train_test["test"]
 
-        ent = load_entity_file(ent_path)
-        gt = {
-            "company": str(ent.get("company", "")).strip(),
-            "date": str(ent.get("date", "")).strip(),  # keep raw format
-            "address": str(ent.get("address", "")).strip(),
-            "total": str(ent.get("total", "")).strip(),
-        }
+# --- Model ---
+model = LayoutLMv3ForTokenClassification.from_pretrained(
+    "microsoft/layoutlmv3-base",
+    num_labels=len(labels),
+    id2label=id2label,
+    label2id=label2id,
+)
 
-        s = "<s_receipt>" + json.dumps(gt, ensure_ascii=False) + "</s>"
-        samples.append({"image": os.path.join(img_dir, fname), "ground_truth": s})
+# --- Training ---
+args = TrainingArguments(
+    output_dir="/kaggle/temp/outputs_layoutlmv3",
+    learning_rate=3e-5,
+    num_train_epochs=10,
+    per_device_train_batch_size=2,
+    per_device_eval_batch_size=2,
+    evaluation_strategy="epoch",
+    save_strategy="epoch",
+    fp16=True,
+    save_total_limit=2,
+    logging_steps=25,
+)
 
-    with open(out_json, "w", encoding="utf-8") as f:
-        for s in samples:
-            f.write(json.dumps(s, ensure_ascii=False) + "\n")
+trainer = Trainer(
+    model=model,
+    args=args,
+    train_dataset=train_ds,
+    eval_dataset=val_ds,
+    tokenizer=processor,
+)
 
-    print(f"✅ Saved {len(samples)} samples → {out_json}")
-    return out_json
-
-
-def donut_collate_fn(batch):
-    """Pads labels and creates attention mask."""
-    pixel_values = torch.stack([b["pixel_values"] for b in batch])
-    lengths = [b["labels"].size(0) for b in batch]
-    max_len = max(lengths)
-    labels = torch.full((len(batch), max_len), -100, dtype=torch.long)
-    attn = torch.zeros((len(batch), max_len), dtype=torch.long)
-    for i, b in enumerate(batch):
-        L = b["labels"].size(0)
-        labels[i, :L] = b["labels"]
-        attn[i, :L] = 1
-    return {"pixel_values": pixel_values, "labels": labels, "labels_attention_mask": attn}
-
-
-def levenshtein(a: str, b: str) -> int:
-    """Simple edit distance (no dependencies)."""
-    if a == b: return 0
-    if len(a) == 0: return len(b)
-    if len(b) == 0: return len(a)
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, 1):
-        cur = [i]
-        for j, cb in enumerate(b, 1):
-            cur.append(min(cur[-1] + 1, prev[j] + 1, prev[j - 1] + (ca != cb)))
-        prev = cur
-    return prev[-1]
-
-
-# -------------------- Main --------------------
-def main():
-    set_seed(42)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    data_root = "/kaggle/input/receipt-dataset"
-    out_dir = "/kaggle/temp/outputs_donut"
-    base_id = "Bennet1996/donut-small"
-    os.makedirs(out_dir, exist_ok=True)
-
-    # === Build JSON manifests ===
-    train_json = build_donut_json(data_root, "train", os.path.join(out_dir, "train.json"))
-    val_json = build_donut_json(data_root, "test", os.path.join(out_dir, "val.json"))
-    dataset = load_dataset("json", data_files={"train": train_json, "validation": val_json})
-
-    # === Processor + model ===
-    processor = DonutProcessor.from_pretrained(base_id)
-    model = VisionEncoderDecoderModel.from_pretrained(base_id)
-
-    # --- Add task tokens and proper PAD token ---
-    specials = ["<s_receipt>", "</s>"]
-    added = processor.tokenizer.add_tokens(specials)
-    if added > 0:
-        model.decoder.resize_token_embeddings(len(processor.tokenizer))
-        print(f"✅ Added {added} special tokens for <s_receipt> task.")
-
-    # Fix PAD/EOS confusion
-    if processor.tokenizer.pad_token is None or (
-        processor.tokenizer.pad_token_id == processor.tokenizer.eos_token_id
-    ):
-        processor.tokenizer.add_special_tokens({"pad_token": "<pad>"})
-        model.decoder.resize_token_embeddings(len(processor.tokenizer))
-    processor.tokenizer.pad_token = processor.tokenizer.pad_token or "<pad>"
-
-    model.config.pad_token_id = processor.tokenizer.pad_token_id
-    model.config.eos_token_id = processor.tokenizer.eos_token_id
-    model.config.decoder_start_token_id = processor.tokenizer.convert_tokens_to_ids("<s_receipt>")
-    model.config.max_length = 256
-    model.config.use_cache = False
-    model.decoder.config.use_cache = False
-
-    # --- GenerationConfig for cleaner eval ---
-    model.generation_config = GenerationConfig(
-        max_length=128,
-        num_beams=1,
-        do_sample=False,
-        pad_token_id=processor.tokenizer.pad_token_id,
-        eos_token_id=processor.tokenizer.eos_token_id,
-        decoder_start_token_id=processor.tokenizer.convert_tokens_to_ids("<s_receipt>"),
-    )
-
-    # === LoRA on decoder only ===
-    lora_cfg = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
-        r=16,
-        lora_alpha=32,
-        lora_dropout=0.05,
-        target_modules=["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"],
-    )
-    model.decoder = get_peft_model(model.decoder, lora_cfg)
-    model.decoder.print_trainable_parameters()
-
-    # Freeze encoder
-    for p in model.encoder.parameters():
-        p.requires_grad = False
-
-    # === Transform ===
-    IMG_SIZE = 512
-    eos_id = processor.tokenizer.eos_token_id
-
-    def transform(example):
-        def process_one(img_path, gt_text):
-            image = Image.open(img_path).convert("RGB").resize((IMG_SIZE, IMG_SIZE))
-            pv = processor(images=image, return_tensors="pt").pixel_values.squeeze(0)
-            ids = processor.tokenizer(
-                gt_text,
-                add_special_tokens=False,
-                return_tensors="pt",
-                truncation=True,
-                max_length=256,
-            ).input_ids.squeeze(0)
-            if eos_id is not None:
-                ids = torch.cat([ids, torch.tensor([eos_id])])
-            return {"pixel_values": pv, "labels": ids}
-
-        if isinstance(example["image"], list):
-            outs = [process_one(img, gt) for img, gt in zip(example["image"], example["ground_truth"])]
-            return {
-                "pixel_values": torch.stack([x["pixel_values"] for x in outs]),
-                "labels": [x["labels"] for x in outs],
-            }
-        else:
-            return process_one(example["image"], example["ground_truth"])
-
-    dataset = dataset.with_transform(transform)
-    gc.collect()
-
-    # === Training arguments ===
-    args = Seq2SeqTrainingArguments(
-        output_dir=out_dir,
-        num_train_epochs=2,
-        learning_rate=5e-5,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=4,
-        predict_with_generate=True,
-        generation_max_length=None,  # use model.generation_config
-        fp16=True,
-        save_strategy="epoch",
-        evaluation_strategy="steps",
-        eval_steps=500,
-        per_device_eval_batch_size=8,
-        eval_accumulation_steps=8,
-        logging_dir=os.path.join(out_dir, "logs"),
-        save_total_limit=2,
-        report_to=[],
-        warmup_ratio=0.06,
-        lr_scheduler_type="cosine",
-        max_grad_norm=0.5,
-        weight_decay=0.01,
-        dataloader_pin_memory=True,
-        remove_unused_columns=False,
-    )
-
-    # === Metrics ===
-    pad_id = processor.tokenizer.pad_token_id
-
-    def compute_metrics(eval_preds):
-        preds, labels = eval_preds
-        preds_str = processor.batch_decode(preds, skip_special_tokens=True)
-        labels_np = np.where(labels != -100, labels, pad_id)
-        labels_str = processor.batch_decode(labels_np, skip_special_tokens=True)
-        cers = [
-            levenshtein(p.strip(), l.strip()) / max(1, len(l.strip()))
-            for p, l in zip(preds_str, labels_str)
-            if l.strip()
-        ]
-        return {"cer": float(np.mean(cers)) if cers else 0.0}
-
-    # === Trainer ===
-    class DonutTrainer(Seq2SeqTrainer):
-        def compute_loss(self, model, inputs, return_outputs=False):
-            outputs = model(pixel_values=inputs["pixel_values"], labels=inputs["labels"])
-            loss = outputs.loss
-            return (loss, outputs) if return_outputs else loss
-
-    trainer = DonutTrainer(
-        model=model.to(device),
-        args=args,
-        train_dataset=dataset["train"],
-        eval_dataset=dataset["validation"],
-        data_collator=donut_collate_fn,
-        compute_metrics=compute_metrics,
-    )
-
-    # === Train ===
-    print("🚀 Training started...")
-    trainer.train()
-    print("✅ Training complete.")
-
-    # === Save ===
-    final_base = os.path.join(out_dir, "final_model_lora")
-    adapter_dir = os.path.join(out_dir, "final_lora_adapter")
-
-    model.save_pretrained(final_base)
-    processor.save_pretrained(final_base)
-
-    model.decoder.save_pretrained(adapter_dir)
-    processor.save_pretrained(adapter_dir)
-
-    print(f"✅ Final model saved: {final_base}")
-    print(f"✅ Adapter saved: {adapter_dir}")
-
-
-if __name__ == "__main__":
-    main()
+trainer.train()
+model.save_pretrained("/kaggle/temp/outputs_layoutlmv3/final_model")
+processor.save_pretrained("/kaggle/temp/outputs_layoutlmv3/final_model")
+print("✅ LayoutLMv3 fine-tuning complete.")
