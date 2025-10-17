@@ -38,7 +38,7 @@ from src.receipt_ie.utils.postproc import (
     norm_total,
     soft_addr_norm,
 )
-from ..utils.llm_client import LLMClient
+from src.receipt_ie.utils.llm_client import LLMClient
 
 # === Optional ===
 try:
