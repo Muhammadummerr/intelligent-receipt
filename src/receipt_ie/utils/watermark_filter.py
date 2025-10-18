@@ -11,7 +11,7 @@ from transformers import ViTForImageClassification, ViTImageProcessor
 import re
 
 # === Hugging Face model path ===
-WM_MODEL_ID = "muhammadummerrr/vit-watermark-detector-v"
+WM_MODEL_ID = "muhammadummerrr/vit-water-mark-detector-v1"
 
 # === Load model once globally ===
 device = "cuda" if torch.cuda.is_available() else "cpu"
