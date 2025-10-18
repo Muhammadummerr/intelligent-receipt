@@ -75,90 +75,136 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
 def build_reasoning_prompt(ocr_text: str, extracted: Dict[str, Any]) -> str:
     """
     Optimized reasoning prompt for robust receipt correction.
-    Emphasizes deterministic JSON-only output, receipt domain knowledge,
-    and practical extraction heuristics.
+    - Adds rule to preserve correctly extracted fields.
+    - Includes high-quality few-shot examples.
+    - Forces deterministic, JSON-only structured output.
     """
     return f"""
-You are a **receipt intelligence agent**.
+You are a **receipt intelligence agent** trained to extract clean, structured information from scanned receipts.
 
-Your task is to correct and complete structured fields from OCR text.
-You must reason carefully and output **only valid JSON** with exactly these keys:
+Your job is to carefully review OCR text and correct or fill any missing or incorrect fields in the extracted JSON below.
+DO NOT modify fields that are already correct.
+
+Output **only valid JSON** with exactly these 5 keys:
 ["company", "date", "address", "total", "agent_comment"]
 
 ---
 
 ### 🧾 INPUTS
 
-**OCR_TEXT (raw extracted text)**:
+**OCR_TEXT (raw extracted text):**
 {ocr_text.strip()}
 
-**EXTRACTED_JSON (initial model output)**:
+**EXTRACTED_JSON (initial model output):**
 {json.dumps(extracted, indent=2, ensure_ascii=False)}
 
 ---
 
 ### 🎯 TASK
-1. Review the OCR text and fix or fill missing fields in EXTRACTED_JSON.
-2. Use logical and visual cues to infer missing data.
-3. If a value is not clearly present, leave it as an empty string ("").
+1. Correct or fill missing/incorrect fields using clues from OCR_TEXT.
+2. **Preserve fields that are already correct** in EXTRACTED_JSON.
+3. If a field cannot be confidently found, leave it as an empty string ("").
+4. Add a brief "agent_comment" summarizing what you changed or verified (avoid mentioning already-correct fields).
 
 ---
 
 ### 🧩 FIELD RULES
 
-- **company** → The main merchant name (usually top 1–3 lines).
-  * Often ends with “SDN BHD”, “ENTERPRISE”, “LTD”, or “TRADING”.
-  * Should not include words like TAX INVOICE, TEL, or RECEIPT.
-  * Keep uppercase or title case as appropriate.
+- **company** → Merchant or restaurant name (usually in top 1–3 lines).
+  * Usually ends with "SDN BHD", "ENTERPRISE", or "LTD".
+  * Exclude words like TAX INVOICE, RECEIPT, or TEL.
+  * Keep uppercase or title case.
 
-- **date** → The main transaction date.
-  * Must be in **DD/MM/YYYY** format (normalize variants like 20-04-18 or 2018/04/20).
-  * Ignore manufacturing or expiry dates if they appear.
-  * If multiple dates appear, pick the latest one.
+- **date** → Transaction date in **DD/MM/YYYY** format.
+  * Normalize variants like 2018/04/20 or 20-04-18.
+  * Ignore manufacturing/expiry dates.
+  * If multiple dates exist, prefer the latest one.
 
-- **address** → Physical store or branch location.
-  * Usually contains street words like “JALAN”, “TAMAN”, “ROAD”, “SELANGOR”, or “KUALA LUMPUR”.
-  * Combine multi-line addresses into one clean sentence.
-  * Do not include phone numbers or “TEL” lines.
+- **address** → Full store or branch location.
+  * Often includes “JALAN”, “TAMAN”, “ROAD”, “SELANGOR”, or “KUALA LUMPUR”.
+  * Merge multi-line addresses into one line.
+  * Exclude phone numbers and "TEL" lines.
 
-- **total** → Final amount payable.
-  * Usually the largest numeric value near keywords like “TOTAL”, “CASH”, “AMOUNT DUE”.
-  * Return only the numeric value (e.g., "87.45") without “RM” or “$”.
+- **total** → Final payable amount.
+  * Usually the largest number near TOTAL, CASH, or AMOUNT DUE.
+  * Return numeric only (e.g., "87.45"), no currency symbols.
 
-- **agent_comment** → One concise sentence explaining what you fixed or inferred.
-
----
-
-### ⚙️ OUTPUT INSTRUCTIONS
-- Respond with **JSON only**, no markdown, text, or explanations.
-- Each value must be a string (even numeric ones).
-- Ensure it parses cleanly with Python `json.loads()`.
+- **agent_comment** → One concise line explaining what you changed or confirmed.
+  * Example: "Corrected total and normalized date format."
 
 ---
 
-### 🧠 EXAMPLES
+### ⚙️ OUTPUT RULES
+- Output **only valid JSON** (no markdown, no prose).
+- Each value must be a string.
+- Ensure JSON can be parsed with `json.loads()`.
 
-Example 1:
+---
+
+### 🧠 FEW-SHOT EXAMPLES
+
+#### Example 1
 OCR_TEXT:
-KEDAI PAPAN YEW CHUAN
-LOT 276 JALAN BANTING 43800 DENGKIL SELANGOR
-DATE 20/04/2018
-TOTAL RM 87.45
+ONE ONE THREE SEAFOOD RESTAURANT SDN BHD
+(1120908-M)
+NO.1, TAMAN SRI DENGKIL, JALAN AIR HITAM
+43800 DENGKIL, SELANGOR.
+(GST REG. NO : 000670224384)
+DATE : 30-05-2018
+TOTAL (INCLUSIVE OF GST): 87.45
+CASH : 87.45
 
 EXTRACTED_JSON:
-{{"company": "", "date": "", "address": "", "total": ""}}
+{{
+  "company": "",
+  "date": "",
+  "address": "",
+  "total": ""
+}}
 
 OUTPUT:
-{{"company": "KEDAI PAPAN YEW CHUAN",
-  "date": "20/04/2018",
-  "address": "LOT 276 JALAN BANTING 43800 DENGKIL SELANGOR",
+{{
+  "company": "ONE ONE THREE SEAFOOD RESTAURANT SDN BHD",
+  "date": "30/05/2018",
+  "address": "NO.1, TAMAN SRI DENGKIL, JALAN AIR HITAM 43800 DENGKIL, SELANGOR.",
   "total": "87.45",
-  "agent_comment": "Filled all fields from clearly labeled OCR lines."}}
+  "agent_comment": "Extracted company, address, date, and total directly from labeled OCR lines."
+}}
 
 ---
 
-Now output the final corrected JSON for the given OCR text.
+#### Example 2
+OCR_TEXT:
+LEMON TREE RESTAURANT
+JTJ FOODS SDN BHD (1179227A)
+NO 3, JALAN PERMAS 10/8, BANDAR BARU PERMAS JAYA,
+81750 MASAI, JOHOR
+INVOICE DATE: 6/1/2018 6:42:02 PM
+TOTAL AMOUNT: 10.30
+
+EXTRACTED_JSON:
+{{
+  "company": "",
+  "date": "06/01/2018",
+  "address": "",
+  "total": "10.30"
+}}
+
+OUTPUT:
+{{
+  "company": "LEMON TREE RESTAURANT JTJ FOODS SDN BHD",
+  "date": "06/01/2018",
+  "address": "NO 3, JALAN PERMAS 10/8, BANDAR BARU PERMAS JAYA, 81750 MASAI, JOHOR",
+  "total": "10.30",
+  "agent_comment": "company and address were inferred and formatted from OCR lines"
+}}
+
+---
+
+Now carefully generate the **final corrected JSON** for the given OCR text.
+Ensure valid JSON format and preserve all already-correct fields.
 """.strip()
+
 
 
 # ===================== NORMALIZATION =====================
