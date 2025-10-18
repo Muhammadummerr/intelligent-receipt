@@ -67,15 +67,19 @@ def overlay_text_stamp(
     overlay = Image.new("RGBA", base.size, (255, 255, 255, 0))
     draw = ImageDraw.Draw(overlay)
 
-    # estimate font size relative to image
     if fontsize is None:
         fontsize = max(20, int(min(W, H) * 0.12 * scale))
     font = load_font(font_path, fontsize)
 
-    # create repeated tiled text so it crosses image
-    text_w, text_h = draw.textsize(text, font=font)
+    # --- compute text size (Pillow 10+ compatibility)
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    except AttributeError:
+        text_w, text_h = draw.textsize(text, font=font)
+
     # create a text image
-    txt_img = Image.new("RGBA", (text_w + 10, text_h + 10), (255,255,255,0))
+    txt_img = Image.new("RGBA", (text_w + 10, text_h + 10), (255, 255, 255, 0))
     td = ImageDraw.Draw(txt_img)
     td.text((5, 5), text, font=font, fill=fill + (255,))
 
@@ -83,20 +87,20 @@ def overlay_text_stamp(
     txt_img = txt_img.rotate(angle, expand=1)
     tx_w, tx_h = txt_img.size
 
-    # tile across center region
     step_x = int(tx_w * 1.2)
     step_y = int(tx_h * 1.8)
     start_x = -step_x
     start_y = H // 4 - tx_h // 2
+
     for x in range(start_x, W + step_x, step_x):
         for y in range(start_y, H + step_y, step_y):
             overlay.paste(txt_img, (x, y), txt_img)
 
-    # apply opacity
     alpha = overlay.split()[3].point(lambda p: int(p * opacity))
     overlay.putalpha(alpha)
     out = Image.alpha_composite(base, overlay).convert("RGB")
     return out
+
 
 def translucent_box_erase(
     img: Image.Image,
