@@ -164,7 +164,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_root", required=True, help="Dataset root that contains train/ val/ test/")
     ap.add_argument("--out_dir", required=True, help="Where to save checkpoints/metrics")
-    ap.add_argument("--model_name", default="facebook/deit-base-distilled-patch16-224")
+    ap.add_argument("--model_name", default="google/vit-base-patch16-224-in21k")
     ap.add_argument("--epochs", type=int, default=8)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--lr", type=float, default=5e-5)
