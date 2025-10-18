@@ -154,13 +154,19 @@ def shadow_patch(img):
 # EFFECT MIXER
 # -------------------------------
 ADVANCED_WM_TYPES = {
-    "stamp": overlay_text_stamp,
+    "stamp": lambda img: overlay_text_stamp(
+        img,
+        text=random.choice(DEFAULT_WM_TEXTS),
+        opacity=random.uniform(0.08, 0.2),
+        angle=random.uniform(-25, 25),
+    ),
     "blur_top": lambda img: local_blur(img, top_region_box(*img.size)),
     "black_bar": lambda img: blackout_bar(img, top_region_box(*img.size)),
-    "highlight_patch": highlight_patch,
-    "ink_bleed": ink_bleed,
+    "highlight_patch": lambda img: highlight_patch(img, opacity=random.uniform(0.15, 0.3)),
+    "ink_bleed": lambda img: ink_bleed(img, text=random.choice(FAKE_NAMES)),
     "shadow_patch": shadow_patch,
 }
+
 
 def synthesize_watermarked_image(img, rng):
     """Apply 1–3 random watermark effects."""
