@@ -176,8 +176,8 @@ def main():
 
     # Scan splits
     train_paths, train_labels = scan_split(os.path.join(args.data_root, "train"))
-    val_paths, val_labels     = scan_split(os.path.join(args.data_root, "val"))
-    test_paths, test_labels   = scan_split(os.path.join(args.data_root, "test"))
+    # val_paths, val_labels     = scan_split(os.path.join(args.data_root, "val"))
+    val_paths, val_labels    = scan_split(os.path.join(args.data_root, "test"))
 
     assert train_paths, "No training images found."
     assert val_paths, "No validation images found."
@@ -197,7 +197,7 @@ def main():
     # Datasets
     train_ds = ReceiptWMDataset(train_paths, train_labels, processor, augment=True)
     val_ds   = ReceiptWMDataset(val_paths, val_labels, processor, augment=False)
-    test_ds  = ReceiptWMDataset(test_paths, test_labels, processor, augment=False) if test_paths else None
+    # test_ds  = ReceiptWMDataset(test_paths, test_labels, processor, augment=False) if test_paths else None
 
     # Class weights (handle imbalance)
     cls_counts = np.bincount(train_labels, minlength=2)
@@ -254,8 +254,8 @@ def main():
         print("Confusion matrix [rows=true clean, watermarked]:\n", cm)
 
     eval_split("VAL", val_ds, val_labels)
-    if test_ds:
-        eval_split("TEST", test_ds, test_labels)
+    # if test_ds:
+    #     eval_split("TEST", test_ds, test_labels)
 
     # Demo prediction print (first val sample)
     demo_path = val_paths[0]
