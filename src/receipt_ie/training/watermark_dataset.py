@@ -203,19 +203,19 @@ def build_dataset(input_dir, output_dir, target_per_class=500,
             wim, typ, reason = synthesize_watermarked_image(im.copy(), rng)
             wm.append((wim, p.name, typ, reason))
 
-    # Preview
-    if preview>0:
-        import matplotlib.pyplot as plt
-        samples = rng.sample(wm+clean, min(preview, len(wm)+len(clean)))
-        plt.figure(figsize=(12,6))
-        for i,(im,name,typ,reason) in enumerate(samples):
-            plt.subplot(2,(len(samples)+1)//2,i+1)
-            plt.imshow(im)
-            plt.axis("off")
-            plt.title(typ, fontsize=10)
-        plt.show()
-        if input("Continue building dataset? (y/n): ").strip().lower()!="y":
-            print("❌ Cancelled."); return
+    # # Preview
+    # if preview>0:
+    #     import matplotlib.pyplot as plt
+    #     samples = rng.sample(wm+clean, min(preview, len(wm)+len(clean)))
+    #     plt.figure(figsize=(12,6))
+    #     for i,(im,name,typ,reason) in enumerate(samples):
+    #         plt.subplot(2,(len(samples)+1)//2,i+1)
+    #         plt.imshow(im)
+    #         plt.axis("off")
+    #         plt.title(typ, fontsize=10)
+    #     plt.show()
+    #     if input("Continue building dataset? (y/n): ").strip().lower()!="y":
+    #         print("❌ Cancelled."); return
 
     # Split and write
     all_ = clean + wm
