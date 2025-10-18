@@ -40,41 +40,30 @@ LOW_CONTRAST_THRESHOLD = 20
 # ---------------------------------------------------
 # VISUAL DETECTION
 # ---------------------------------------------------
-def detect_visual_watermark(image_path: str) -> Tuple[bool, Optional[str]]:
-    """
-    Detect watermark-like overlays using pixel statistics (OpenCV).
-    - High edge density + high contrast = overlay or watermark
-    - Extreme smoothness = blurred watermark region
-    """
-    try:
-        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            return False, "Unreadable image file."
+def detect_visual_watermark(image_path: str) -> tuple[bool, str]:
+    import cv2, numpy as np
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return False, "unreadable image"
 
-        # Resize large images for speed
-        h, w = img.shape
-        if h * w > 2_000_000:
-            img = cv2.resize(img, (w // 2, h // 2))
+    h, w = img.shape
+    img_small = cv2.resize(img, (min(w, 1024), min(h, 1024)))
+    edges = cv2.Canny(img_small, 30, 100)
+    blur = cv2.GaussianBlur(img_small, (5, 5), 0)
 
-        # Step 1 — Edge detection
-        edges = cv2.Canny(img, 30, 100)
-        edge_density = np.sum(edges > 0) / img.size
+    # divide into 8×8 tiles, look for unusual texture regions
+    tile_h, tile_w = img_small.shape[0]//8, img_small.shape[1]//8
+    local_std = []
+    for i in range(8):
+        for j in range(8):
+            patch = blur[i*tile_h:(i+1)*tile_h, j*tile_w:(j+1)*tile_w]
+            local_std.append(np.std(patch))
+    local_std = np.array(local_std)
 
-        # Step 2 — Local brightness variation
-        blur = cv2.GaussianBlur(img, (5, 5), 0)
-        std_dev = np.std(blur)
-
-        # Step 3 — Low contrast detection (common in blurred watermarks)
-        contrast = img.max() - img.min()
-
-        # Heuristic decision
-        if edge_density > EDGE_DENSITY_THRESHOLD and std_dev > BRIGHTNESS_VARIATION_THRESHOLD:
-            return True, f"Unnatural high-frequency texture detected (edge density={edge_density:.2f})"
-        if contrast < LOW_CONTRAST_THRESHOLD and std_dev < 15:
-            return True, "Low contrast / blurred text region detected (possible watermark)"
-        return False, "No visual watermark indicators"
-    except Exception as e:
-        return False, f"Visual detection failed: {e}"
+    # big difference between median and max → probable overlay text
+    if local_std.max() - np.median(local_std) > 25:
+        return True, "local brightness anomaly detected (possible faint overlay)"
+    return False, "no visual watermark indicators"
 
 
 # ---------------------------------------------------
