@@ -39,6 +39,7 @@ from src.receipt_ie.utils.postproc import (
     soft_addr_norm,
 )
 from src.receipt_ie.utils.llm_client import LLMClient
+from src.receipt_ie.utils.watermark_filter import check_watermark
 
 # === Optional ===
 try:
@@ -282,6 +283,19 @@ def run_layoutlmv3_extraction(image_path: str, model_dir: str, box_dir: str) -> 
 def run_pipeline_single(image_path: str, model_dir: str, box_dir: str,
                         llm_provider="groq", llm_model="openai/gpt-oss-120b") -> Dict[str, Any]:
     print(f"🔍 Processing: {os.path.basename(image_path)}")
+
+    print("🛡️ Checking for watermarks or tampering...")
+    is_marked, reason = check_watermark(image_path)
+    if is_marked:
+        result = {
+            "company": "",
+            "date": "",
+            "address": "",
+            "total": "",
+            "agent_comment": f"Receipt rejected automatically → {reason}"
+        }
+        print(f"🚫 Rejected {os.path.basename(image_path)} — {reason}")
+        return result
 
     # Step 1: LayoutLMv3 extraction + OCR fallback
     try:
