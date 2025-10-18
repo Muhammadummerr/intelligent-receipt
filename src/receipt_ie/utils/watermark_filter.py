@@ -40,30 +40,47 @@ LOW_CONTRAST_THRESHOLD = 20
 # ---------------------------------------------------
 # VISUAL DETECTION
 # ---------------------------------------------------
-def detect_visual_watermark(image_path: str) -> tuple[bool, str]:
-    import cv2, numpy as np
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+def detect_visual_watermark(image_path: str, debug: bool=False):
+    img = cv2.imread(image_path)
     if img is None:
         return False, "unreadable image"
 
-    h, w = img.shape
-    img_small = cv2.resize(img, (min(w, 1024), min(h, 1024)))
-    edges = cv2.Canny(img_small, 30, 100)
-    blur = cv2.GaussianBlur(img_small, (5, 5), 0)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+    gray = cv2.resize(gray, (min(1024, w), min(1024, h)))
 
-    # divide into 8×8 tiles, look for unusual texture regions
-    tile_h, tile_w = img_small.shape[0]//8, img_small.shape[1]//8
-    local_std = []
-    for i in range(8):
-        for j in range(8):
-            patch = blur[i*tile_h:(i+1)*tile_h, j*tile_w:(j+1)*tile_w]
-            local_std.append(np.std(patch))
-    local_std = np.array(local_std)
+    # --- Global metrics ---
+    contrast = gray.max() - gray.min()
+    edges = cv2.Canny(gray, 30, 100)
+    edge_density = np.sum(edges > 0) / gray.size
 
-    # big difference between median and max → probable overlay text
-    if local_std.max() - np.median(local_std) > 25:
-        return True, "local brightness anomaly detected (possible faint overlay)"
-    return False, "no visual watermark indicators"
+    # --- Local metrics (variance per tile) ---
+    blur = cv2.GaussianBlur(gray, (5,5), 0)
+    th, tw = gray.shape[0]//8, gray.shape[1]//8
+    stds = [np.std(blur[i*th:(i+1)*th, j*tw:(j+1)*tw])
+            for i in range(8) for j in range(8)]
+    stds = np.array(stds)
+    local_diff = stds.max() - np.median(stds)
+
+    # --- Decision logic ---
+    # condition 1: extremely high-frequency overlay
+    cond_texture = edge_density > 0.25 and local_diff > 35
+    # condition 2: large faint region (low contrast)
+    cond_blur = contrast < 40 and local_diff > 15
+    # condition 3: both unusually sharp and smooth areas coexisting
+    cond_mixed = 15 < local_diff < 35 and 0.15 < edge_density < 0.25
+
+    flagged = cond_texture or cond_blur or cond_mixed
+
+    if debug:
+        print(f"[DEBUG] edge_density={edge_density:.3f}, contrast={contrast:.1f}, local_diff={local_diff:.1f}")
+    if flagged:
+        reason = (
+            "Detected abnormal local brightness/texture pattern "
+            f"(contrast={contrast:.1f}, edge_density={edge_density:.3f}, Δσ={local_diff:.1f})"
+        )
+        return True, reason
+    return False, "no watermark indicators"
 
 
 # ---------------------------------------------------
