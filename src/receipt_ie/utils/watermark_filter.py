@@ -40,47 +40,68 @@ LOW_CONTRAST_THRESHOLD = 20
 # ---------------------------------------------------
 # VISUAL DETECTION
 # ---------------------------------------------------
-def detect_visual_watermark(image_path: str, debug: bool=False):
+import cv2
+import numpy as np
+
+def detect_visual_watermark(image_path: str, debug=False):
+    """
+    Hybrid visual watermark detector (v3).
+    Detects faint transparent overlays or blurred watermarks.
+    Focuses on the upper/middle region of the receipt.
+    """
     img = cv2.imread(image_path)
     if img is None:
         return False, "unreadable image"
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
-    gray = cv2.resize(gray, (min(1024, w), min(1024, h)))
+    gray = cv2.resize(gray, (min(w, 1024), min(h, 1024)))
+    h, w = gray.shape
 
-    # --- Global metrics ---
-    contrast = gray.max() - gray.min()
-    edges = cv2.Canny(gray, 30, 100)
-    edge_density = np.sum(edges > 0) / gray.size
+    # --- focus on top 40% of the receipt ---
+    top_region = gray[: int(0.4 * h), :]
 
-    # --- Local metrics (variance per tile) ---
-    blur = cv2.GaussianBlur(gray, (5,5), 0)
-    th, tw = gray.shape[0]//8, gray.shape[1]//8
-    stds = [np.std(blur[i*th:(i+1)*th, j*tw:(j+1)*tw])
-            for i in range(8) for j in range(8)]
-    stds = np.array(stds)
-    local_diff = stds.max() - np.median(stds)
+    # --- gradient magnitude and direction ---
+    gx = cv2.Sobel(top_region, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(top_region, cv2.CV_32F, 0, 1, ksize=3)
+    mag, ang = cv2.cartToPolar(gx, gy)
 
-    # --- Decision logic ---
-    # condition 1: extremely high-frequency overlay
-    cond_texture = edge_density > 0.25 and local_diff > 35
-    # condition 2: large faint region (low contrast)
-    cond_blur = contrast < 40 and local_diff > 15
-    # condition 3: both unusually sharp and smooth areas coexisting
-    cond_mixed = 15 < local_diff < 35 and 0.15 < edge_density < 0.25
+    # gradient variance: high variance = mixed text + overlay
+    grad_var = np.var(mag)
+    dir_var = np.var(ang)
 
-    flagged = cond_texture or cond_blur or cond_mixed
+    # --- edge density & contrast ---
+    edges = cv2.Canny(top_region, 30, 100)
+    edge_density = np.sum(edges > 0) / edges.size
+    contrast = top_region.max() - top_region.min()
+
+    # --- local std deviation pattern ---
+    blur = cv2.GaussianBlur(top_region, (5, 5), 0)
+    tile_h, tile_w = blur.shape[0] // 6, blur.shape[1] // 6
+    stds = [np.std(blur[i*tile_h:(i+1)*tile_h, j*tile_w:(j+1)*tile_w])
+            for i in range(6) for j in range(6)]
+    local_diff = np.max(stds) - np.median(stds)
+
+    # --- composite heuristic ---
+    cond_overlay = (edge_density > 0.18 and local_diff > 18 and grad_var > 80)
+    cond_blur = (contrast < 50 and local_diff > 15)
+    cond_directional = (dir_var > 1.5 and grad_var > 60)
+
+    flagged = cond_overlay or cond_blur or cond_directional
 
     if debug:
-        print(f"[DEBUG] edge_density={edge_density:.3f}, contrast={contrast:.1f}, local_diff={local_diff:.1f}")
+        print(f"[DEBUG] edge_density={edge_density:.3f}, contrast={contrast:.1f}, "
+              f"grad_var={grad_var:.1f}, dir_var={dir_var:.2f}, local_diff={local_diff:.1f}")
+
     if flagged:
         reason = (
-            "Detected abnormal local brightness/texture pattern "
-            f"(contrast={contrast:.1f}, edge_density={edge_density:.3f}, Δσ={local_diff:.1f})"
+            f"Possible faint overlay detected "
+            f"(edge_density={edge_density:.2f}, contrast={contrast:.1f}, "
+            f"grad_var={grad_var:.1f}, dir_var={dir_var:.2f}, Δσ={local_diff:.1f})"
         )
         return True, reason
     return False, "no watermark indicators"
+
 
 
 # ---------------------------------------------------
