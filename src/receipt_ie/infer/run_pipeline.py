@@ -73,28 +73,93 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
 
 # ===================== PROMPT BUILDER =====================
 def build_reasoning_prompt(ocr_text: str, extracted: Dict[str, Any]) -> str:
+    """
+    Optimized reasoning prompt for robust receipt correction.
+    Emphasizes deterministic JSON-only output, receipt domain knowledge,
+    and practical extraction heuristics.
+    """
     return f"""
-You are an AI agent specialized in understanding receipts.
+You are a **receipt intelligence agent**.
 
-INPUTS:
-OCR_TEXT:
-{ocr_text}
+Your task is to correct and complete structured fields from OCR text.
+You must reason carefully and output **only valid JSON** with exactly these keys:
+["company", "date", "address", "total", "agent_comment"]
 
-EXTRACTED_JSON:
+---
+
+### 🧾 INPUTS
+
+**OCR_TEXT (raw extracted text)**:
+{ocr_text.strip()}
+
+**EXTRACTED_JSON (initial model output)**:
 {json.dumps(extracted, indent=2, ensure_ascii=False)}
 
-TASK:
-- Correct or fill missing fields using clues in OCR_TEXT.
-- Output valid JSON with keys:
-  ["company", "date", "address", "total", "agent_comment"]
+---
 
-Rules:
-- company → main vendor name (usually first few lines)
-- date → main transaction date (DD/MM/YYYY)
-- address → store location or street
-- total → largest numeric value near TOTAL/AMOUNT/CASH
-- agent_comment → short sentence explaining changes
+### 🎯 TASK
+1. Review the OCR text and fix or fill missing fields in EXTRACTED_JSON.
+2. Use logical and visual cues to infer missing data.
+3. If a value is not clearly present, leave it as an empty string ("").
+
+---
+
+### 🧩 FIELD RULES
+
+- **company** → The main merchant name (usually top 1–3 lines).
+  * Often ends with “SDN BHD”, “ENTERPRISE”, “LTD”, or “TRADING”.
+  * Should not include words like TAX INVOICE, TEL, or RECEIPT.
+  * Keep uppercase or title case as appropriate.
+
+- **date** → The main transaction date.
+  * Must be in **DD/MM/YYYY** format (normalize variants like 20-04-18 or 2018/04/20).
+  * Ignore manufacturing or expiry dates if they appear.
+  * If multiple dates appear, pick the latest one.
+
+- **address** → Physical store or branch location.
+  * Usually contains street words like “JALAN”, “TAMAN”, “ROAD”, “SELANGOR”, or “KUALA LUMPUR”.
+  * Combine multi-line addresses into one clean sentence.
+  * Do not include phone numbers or “TEL” lines.
+
+- **total** → Final amount payable.
+  * Usually the largest numeric value near keywords like “TOTAL”, “CASH”, “AMOUNT DUE”.
+  * Return only the numeric value (e.g., "87.45") without “RM” or “$”.
+
+- **agent_comment** → One concise sentence explaining what you fixed or inferred.
+
+---
+
+### ⚙️ OUTPUT INSTRUCTIONS
+- Respond with **JSON only**, no markdown, text, or explanations.
+- Each value must be a string (even numeric ones).
+- Ensure it parses cleanly with Python `json.loads()`.
+
+---
+
+### 🧠 EXAMPLES
+
+Example 1:
+OCR_TEXT:
+KEDAI PAPAN YEW CHUAN
+LOT 276 JALAN BANTING 43800 DENGKIL SELANGOR
+DATE 20/04/2018
+TOTAL RM 87.45
+
+EXTRACTED_JSON:
+{{"company": "", "date": "", "address": "", "total": ""}}
+
+OUTPUT:
+{{"company": "KEDAI PAPAN YEW CHUAN",
+  "date": "20/04/2018",
+  "address": "LOT 276 JALAN BANTING 43800 DENGKIL SELANGOR",
+  "total": "87.45",
+  "agent_comment": "Filled all fields from clearly labeled OCR lines."}}
+
+---
+
+Now output the final corrected JSON for the given OCR text.
 """.strip()
+
 
 # ===================== NORMALIZATION =====================
 def normalize_refined_output(refined: Dict[str, Any]) -> Dict[str, str]:
