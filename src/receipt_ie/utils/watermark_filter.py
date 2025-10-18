@@ -1,179 +1,65 @@
 """
 watermark_filter.py
--------------------
-Detects watermarked or tampered receipts before model inference.
-
-Includes:
-✅ Visual watermark detection (edges, contrast, overlays)
-✅ Textual watermark detection (keywords like SAMPLE, VOID, etc.)
-✅ Safelist of legitimate vendor names
-✅ Confidence-based filtering (optional)
+--------------------
+Detects textual and visual watermarks using a trained ViT classifier
+and OCR text-based keyword checks.
 """
 
-import cv2
-import numpy as np
+import torch
+from PIL import Image
+from transformers import ViTForImageClassification, ViTImageProcessor
 import re
-from typing import Tuple, Optional
 
-# -----------------------------
-# CONFIGURATION
-# -----------------------------
-# Legitimate names that must never trigger rejection
-SAFE_NAMES = [
-    "tan chay yee", "ahmad", "lee", "trading", "enterprise",
-    "restaurant", "sdn bhd", "bhd", "enterprise", "s/b"
+# === Hugging Face model path ===
+WM_MODEL_ID = "muhammadummerrr/vit-watermark-detector-v1"
+
+# === Load model once globally ===
+device = "cuda" if torch.cuda.is_available() else "cpu"
+wm_processor = ViTImageProcessor.from_pretrained(WM_MODEL_ID)
+wm_model = ViTForImageClassification.from_pretrained(WM_MODEL_ID).to(device).eval()
+
+# === Textual watermark keywords ===
+TEXTUAL_WATERMARKS = [
+    "confidential", "sample", "demo", "void", "training",
+    "watermark", "practice", "test", "unofficial", "do not copy",
 ]
 
-# True watermark / synthetic indicators
-WATERMARK_KEYWORDS = [
-    "sample", "confidential", "training",
-    "void", "demo", "practice", "fake",
-    "for testing", "invalid", "watermark", "do not use"
-]
-
-# Visual detection thresholds
-EDGE_DENSITY_THRESHOLD = 0.12     # higher = more edges, potential overlay
-BRIGHTNESS_VARIATION_THRESHOLD = 25
-LOW_CONTRAST_THRESHOLD = 20
+def check_textual_watermark(ocr_text: str) -> (bool, str):
+    text = ocr_text.lower()
+    for w in TEXTUAL_WATERMARKS:
+        if w in text:
+            return True, f"textual watermark detected ('{w}')"
+    return False, ""
 
 
-# ---------------------------------------------------
-# VISUAL DETECTION
-# ---------------------------------------------------
-import cv2
-import numpy as np
+def check_visual_watermark(image_path: str, threshold: float = 0.65) -> (bool, str):
+    """Use ViT classifier to predict visual watermark probability."""
+    im = Image.open(image_path).convert("RGB")
+    inputs = wm_processor(images=im, return_tensors="pt").to(device)
+    with torch.no_grad():
+        logits = wm_model(**inputs).logits
+        probs = torch.softmax(logits, dim=-1)[0].cpu().numpy()
+    clean_prob, wm_prob = probs[0], probs[1]
+    if wm_prob >= threshold:
+        return True, f"visual watermark detected (prob={wm_prob:.2f})"
+    return False, f"no watermark detected (prob={wm_prob:.2f})"
 
-def detect_visual_watermark(image_path: str, debug=False):
+
+def check_watermark(image_path: str, ocr_text: str = "") -> (bool, str):
     """
-    Hybrid visual watermark detector (v3).
-    Detects faint transparent overlays or blurred watermarks.
-    Focuses on the upper/middle region of the receipt.
+    Combined filter:
+    1️⃣ Check textual watermarks in OCR text.
+    2️⃣ Check visual watermark probability via ViT classifier.
     """
-    img = cv2.imread(image_path)
-    if img is None:
-        return False, "unreadable image"
-
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    h, w = gray.shape
-    gray = cv2.resize(gray, (min(w, 1024), min(h, 1024)))
-    h, w = gray.shape
-
-    # --- focus on top 40% of the receipt ---
-    top_region = gray[: int(0.4 * h), :]
-
-    # --- gradient magnitude and direction ---
-    gx = cv2.Sobel(top_region, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(top_region, cv2.CV_32F, 0, 1, ksize=3)
-    mag, ang = cv2.cartToPolar(gx, gy)
-
-    # gradient variance: high variance = mixed text + overlay
-    grad_var = np.var(mag)
-    dir_var = np.var(ang)
-
-    # --- edge density & contrast ---
-    edges = cv2.Canny(top_region, 30, 100)
-    edge_density = np.sum(edges > 0) / edges.size
-    contrast = top_region.max() - top_region.min()
-
-    # --- local std deviation pattern ---
-    blur = cv2.GaussianBlur(top_region, (5, 5), 0)
-    tile_h, tile_w = blur.shape[0] // 6, blur.shape[1] // 6
-    stds = [np.std(blur[i*tile_h:(i+1)*tile_h, j*tile_w:(j+1)*tile_w])
-            for i in range(6) for j in range(6)]
-    local_diff = np.max(stds) - np.median(stds)
-
-    # --- composite heuristic ---
-    cond_overlay = (edge_density > 0.18 and local_diff > 18 and grad_var > 80)
-    cond_blur = (contrast < 50 and local_diff > 15)
-    cond_directional = (dir_var > 1.5 and grad_var > 60)
-
-    flagged = cond_overlay or cond_blur or cond_directional
-
-    if debug:
-        print(f"[DEBUG] edge_density={edge_density:.3f}, contrast={contrast:.1f}, "
-              f"grad_var={grad_var:.1f}, dir_var={dir_var:.2f}, local_diff={local_diff:.1f}")
-
-    if flagged:
-        reason = (
-            f"Possible faint overlay detected "
-            f"(edge_density={edge_density:.2f}, contrast={contrast:.1f}, "
-            f"grad_var={grad_var:.1f}, dir_var={dir_var:.2f}, Δσ={local_diff:.1f})"
-        )
-        return True, reason
-    return False, "no watermark indicators"
-
-
-
-# ---------------------------------------------------
-# TEXTUAL DETECTION
-# ---------------------------------------------------
-def detect_textual_watermark(ocr_text: str) -> Tuple[bool, Optional[str]]:
-    """
-    Reject receipt if OCR text includes known watermark indicators,
-    unless a safe company name is found.
-    """
-    if not ocr_text.strip():
-        return False, "Empty OCR text"
-
-    text_lower = ocr_text.lower()
-
-    # ✅ Safelist: skip watermark detection if real vendor name present
-    for safe in SAFE_NAMES:
-        if safe in text_lower:
-            return False, f"Legitimate business term found ('{safe}')"
-
-    # 🚫 Watermark words
-    for kw in WATERMARK_KEYWORDS:
-        if re.search(rf"\b{re.escape(kw)}\b", text_lower):
-            return True, f"Watermark keyword detected ('{kw}')"
-    return False, "No watermark keywords detected"
-
-
-# ---------------------------------------------------
-# CONFIDENCE-BASED DETECTION (OPTIONAL)
-# ---------------------------------------------------
-def detect_low_confidence(ocr_result: Optional[list]) -> Tuple[bool, Optional[str]]:
-    """
-    Takes EasyOCR output (list of [text, bbox, confidence]).
-    If average confidence < 0.5 → possible watermark blur.
-    """
-    if not ocr_result:
-        return False, "No OCR confidence data"
-    confidences = [c for *_, c in ocr_result if isinstance(c, (float, int))]
-    if not confidences:
-        return False, "No numeric OCR confidences"
-
-    avg_conf = np.mean(confidences)
-    if avg_conf < 0.5:
-        return True, f"Low OCR confidence ({avg_conf:.2f}) indicates possible blur/watermark"
-    return False, f"Average OCR confidence {avg_conf:.2f} is acceptable"
-
-
-# ---------------------------------------------------
-# MAIN WRAPPER FUNCTION
-# ---------------------------------------------------
-def check_watermark(image_path: str,
-                    ocr_text: Optional[str] = None,
-                    ocr_result: Optional[list] = None) -> Tuple[bool, str]:
-    """
-    Unified watermark detection function.
-    Returns (is_watermarked, reason)
-    """
-    # 1️⃣ Visual detection
-    vis_flag, vis_reason = detect_visual_watermark(image_path)
-    if vis_flag:
-        return True, f"Visual watermark detected → {vis_reason}"
-
-    # 2️⃣ Textual detection
+    # textual pass
     if ocr_text:
-        txt_flag, txt_reason = detect_textual_watermark(ocr_text)
-        if txt_flag:
-            return True, f"Textual watermark detected → {txt_reason}"
+        found, reason = check_textual_watermark(ocr_text)
+        if found:
+            return True, f"Textual watermark → {reason}"
 
-    # 3️⃣ Confidence check (if OCR result provided)
-    if ocr_result:
-        conf_flag, conf_reason = detect_low_confidence(ocr_result)
-        if conf_flag:
-            return True, f"OCR quality issue → {conf_reason}"
+    # visual pass
+    found, reason = check_visual_watermark(image_path)
+    if found:
+        return True, f"Visual watermark → {reason}"
 
-    return False, "Clean receipt — no watermark indicators"
+    return False, "No watermark detected"
