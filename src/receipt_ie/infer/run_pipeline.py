@@ -74,106 +74,100 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
 # ===================== PROMPT BUILDER =====================
 def build_reasoning_prompt(ocr_text: str, extracted: Dict[str, Any]) -> str:
     """
-    Optimized reasoning prompt for robust receipt correction.
-    - Adds rule to preserve correctly extracted fields.
-    - Includes high-quality few-shot examples.
-    - Forces deterministic, JSON-only structured output.
+    Robust receipt-correction prompt:
+    - Preserves fields already correct in EXTRACTED_JSON.
+    - Rejects watermarked/tampered receipts with clear reasoning.
+    - Uses few-shot examples (incl. rejection case).
+    - Forces deterministic JSON-only output with exact keys.
     """
     return f"""
-You are a **receipt intelligence agent** trained to extract clean, structured information from scanned receipts.
+You are a **receipt intelligence agent**.
 
-Your job is to carefully review OCR text and correct or fill any missing or incorrect fields in the extracted JSON below.
-DO NOT modify fields that are already correct.
+Your job is to review OCR text and correct/complete the extracted JSON.
+**Do NOT modify fields that are already correct** in EXTRACTED_JSON.
+If a receipt appears tampered or watermarked, **reject it**.
 
-Output **only valid JSON** with exactly these 5 keys:
+Return **only valid JSON** with exactly these 5 keys:
 ["company", "date", "address", "total", "agent_comment"]
 
 ---
 
-### 🧾 INPUTS
+### INPUTS
 
-**OCR_TEXT (raw extracted text):**
+OCR_TEXT (raw):
 {ocr_text.strip()}
 
-**EXTRACTED_JSON (initial model output):**
+EXTRACTED_JSON (initial model output):
 {json.dumps(extracted, indent=2, ensure_ascii=False)}
 
 ---
 
-### 🎯 TASK
-1. Correct or fill missing/incorrect fields using clues from OCR_TEXT.
-2. **Preserve fields that are already correct** in EXTRACTED_JSON.
-3. If a field cannot be confidently found, leave it as an empty string ("").
-4. Add a brief "agent_comment" summarizing what you changed or verified (avoid mentioning already-correct fields).
+### TASK
+1) Fix or fill missing/incorrect fields using OCR_TEXT.
+2) **Preserve any field that is already correct** in EXTRACTED_JSON.
+3) If a field cannot be confidently found, leave it as an empty string "".
+4) If the receipt is **tampered/watermarked**, return all empty fields and an explanatory agent_comment.
 
 ---
 
-### 🧩 FIELD RULES
-
-- **company** → Merchant or restaurant name (usually in top 1–3 lines).
-  * Usually ends with "SDN BHD", "ENTERPRISE", or "LTD".
-  * Exclude words like TAX INVOICE, RECEIPT, or TEL.
-  * Keep uppercase or title case.
-
-- **date** → Transaction date in **DD/MM/YYYY** format.
-  * Normalize variants like 2018/04/20 or 20-04-18.
-  * Ignore manufacturing/expiry dates.
-  * If multiple dates exist, prefer the latest one.
-
-- **address** → Full store or branch location.
-  * Often includes “JALAN”, “TAMAN”, “ROAD”, “SELANGOR”, or “KUALA LUMPUR”.
-  * Merge multi-line addresses into one line.
-  * Exclude phone numbers and "TEL" lines.
-
-- **total** → Final payable amount.
-  * Usually the largest number near TOTAL, CASH, or AMOUNT DUE.
-  * Return numeric only (e.g., "87.45"), no currency symbols.
-
-- **agent_comment** → One concise line explaining what you changed or confirmed.
-  * Example: "Corrected total and normalized date format."
+### REJECTION RULES (Watermark / Tamper)
+Reject the document if OCR_TEXT indicates overlay/obstruction or watermark words such as:
+- "tan chay yee", "sample", "confidential", "training", "void", "demo", "watermark"
+or if unrelated text overlaps printed content / blacked-out areas are implied.
+On rejection, output:
+{{
+  "company": "", "date": "", "address": "", "total": "",
+  "agent_comment": "Receipt rejected due to visible watermark/obstruction ('<term>')."
+}}
 
 ---
 
-### ⚙️ OUTPUT RULES
-- Output **only valid JSON** (no markdown, no prose).
-- Each value must be a string.
-- Ensure JSON can be parsed with `json.loads()`.
+### FIELD RULES
+- **company**: Main merchant name (top 1–3 lines; may contain "SDN BHD", "ENTERPRISE", "LTD").
+  Exclude words like TAX INVOICE, RECEIPT, TEL. Keep case natural.
+- **date**: Primary transaction date → format **DD/MM/YYYY** (normalize 2018/04/20 → 20/04/2018; 20-04-18 → 20/04/2018).
+  Ignore manufacture/expiry dates. If multiple dates, prefer the latest.
+- **address**: Full location; often includes “JALAN”, “TAMAN”, “ROAD”, “SELANGOR”, “KUALA LUMPUR”.
+  Merge multi-line into one line. Exclude phone numbers/TEL.
+- **total**: Final payable amount; usually the largest number near TOTAL / CASH / AMOUNT DUE.
+  Return numeric only (e.g., "87.45"), without currency symbols.
+- **agent_comment**: One concise sentence summarizing what you changed or verified.
+  **Do not mention fields that were already correct** in EXTRACTED_JSON.
 
 ---
 
-### 🧠 FEW-SHOT EXAMPLES
+###  OUTPUT RULES
+- Respond with **JSON only**, no markdown/prose.
+- All values must be strings.
+- Must be parseable by Python json.loads().
 
-#### Example 1
+---
+
+### FEW-SHOT EXAMPLES
+
+#### Example 1 — Normal correction
 OCR_TEXT:
 ONE ONE THREE SEAFOOD RESTAURANT SDN BHD
 (1120908-M)
 NO.1, TAMAN SRI DENGKIL, JALAN AIR HITAM
 43800 DENGKIL, SELANGOR.
-(GST REG. NO : 000670224384)
 DATE : 30-05-2018
 TOTAL (INCLUSIVE OF GST): 87.45
 CASH : 87.45
 
 EXTRACTED_JSON:
-{{
-  "company": "",
-  "date": "",
-  "address": "",
-  "total": ""
-}}
+{{"company": "", "date": "", "address": "", "total": ""}}
 
 OUTPUT:
-{{
-  "company": "ONE ONE THREE SEAFOOD RESTAURANT SDN BHD",
+{{"company": "ONE ONE THREE SEAFOOD RESTAURANT SDN BHD",
   "date": "30/05/2018",
   "address": "NO.1, TAMAN SRI DENGKIL, JALAN AIR HITAM 43800 DENGKIL, SELANGOR.",
   "total": "87.45",
-  "agent_comment": "Extracted company, address, date, and total directly from labeled OCR lines."
-}}
+  "agent_comment": "Extracted company, address, date, and total from labeled OCR lines."}}
 
 ---
 
-#### Example 2
+#### Example 2 — Preserve correct fields
 OCR_TEXT:
 LEMON TREE RESTAURANT
 JTJ FOODS SDN BHD (1179227A)
@@ -183,26 +177,35 @@ INVOICE DATE: 6/1/2018 6:42:02 PM
 TOTAL AMOUNT: 10.30
 
 EXTRACTED_JSON:
-{{
-  "company": "",
-  "date": "06/01/2018",
-  "address": "",
-  "total": "10.30"
-}}
+{{"company": "", "date": "06/01/2018", "address": "", "total": "10.30"}}
 
 OUTPUT:
-{{
-  "company": "LEMON TREE RESTAURANT JTJ FOODS SDN BHD",
+{{"company": "LEMON TREE RESTAURANT JTJ FOODS SDN BHD",
   "date": "06/01/2018",
   "address": "NO 3, JALAN PERMAS 10/8, BANDAR BARU PERMAS JAYA, 81750 MASAI, JOHOR",
   "total": "10.30",
-  "agent_comment": "company and address were inferred and formatted from OCR lines"
-}}
+  "agent_comment": "Inferred company and address from OCR context."}}
 
 ---
 
-Now carefully generate the **final corrected JSON** for the given OCR text.
-Ensure valid JSON format and preserve all already-correct fields.
+#### Example 3 — Rejected (Watermark)
+OCR_TEXT:
+tan chay yee
+ABC HO TRADING
+No.284, JALAN HARMONI 3/2, TAMAN DESA HARMONI
+81100 JOHOR BAHRU
+TOTAL: 31.00
+
+EXTRACTED_JSON:
+{{"company": "", "date": "", "address": "", "total": ""}}
+
+OUTPUT:
+{{"company": "", "date": "", "address": "", "total": "",
+  "agent_comment": "Receipt rejected due to visible watermark text ('tan chay yee') overlapping printed content."}}
+
+---
+
+Now analyze the provided OCR_TEXT and return the **final corrected or rejected JSON**.
 """.strip()
 
 
