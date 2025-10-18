@@ -134,7 +134,7 @@ def main():
     parser.add_argument("--pred_dir", required=True, help="Directory of LayoutLMv3 JSON predictions")
     parser.add_argument("--ocr_dir", required=True, help="Directory containing OCR text files (.txt)")
     parser.add_argument("--out_dir", required=True, help="Output directory for refined JSONs")
-    parser.add_argument("--provider", default="openai", choices=["openai", "huggingface", "groq"], help="LLM backend provider")
+    parser.add_argument("--provider", default="groq", choices=["openai", "huggingface", "groq"], help="LLM backend provider")
     parser.add_argument("--model", default="openai/gpt-oss-120b", help="Model name")
     args = parser.parse_args()
 

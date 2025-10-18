@@ -166,7 +166,7 @@ def run_layoutlmv3_extraction(image_path: str, model_dir: str, box_dir: str) -> 
 
 # ===================== PIPELINE CORE =====================
 def run_pipeline_single(image_path: str, model_dir: str, box_dir: str,
-                        llm_provider="openai", llm_model="gpt-4-turbo") -> Dict[str, Any]:
+                        llm_provider="groq", llm_model="openai/gpt-oss-120b") -> Dict[str, Any]:
     print(f"🔍 Processing: {os.path.basename(image_path)}")
 
     # Step 1: LayoutLMv3 extraction + OCR fallback
@@ -207,8 +207,8 @@ def main():
     parser.add_argument("--box_dir", required=True)
     parser.add_argument("--model_dir", default="muhammadummerrr/layoutlmv3-receipt-epochs-20")
     parser.add_argument("--out_path", required=True)
-    parser.add_argument("--provider", default="openai")
-    parser.add_argument("--model", default="gpt-4-turbo")
+    parser.add_argument("--provider", default="groq")
+    parser.add_argument("--model", default="openai/gpt-oss-120b")
     args = parser.parse_args()
 
     result = run_pipeline_single(args.image_path, args.model_dir, args.box_dir, args.provider, args.model)
