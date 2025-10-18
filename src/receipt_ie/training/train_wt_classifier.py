@@ -182,7 +182,7 @@ def main():
     assert train_paths, "No training images found."
     assert val_paths, "No validation images found."
 
-    print(f"Found: train={len(train_paths)} val={len(val_paths)} test={len(test_paths)}")
+    print(f"Found: train={len(train_paths)} val={len(val_paths)}")
 
     # Processor & model
     processor = ViTImageProcessor.from_pretrained(args.model_name)
